@@ -1,15 +1,7 @@
-# --- Framework e Servidor ---
 Flask==2.3.2
 Flask-CORS==4.0.0
 gunicorn==23.0.0
-
-# --- Configuração ---
 python-dotenv==1.0.0
-
-# --- Solana e Anchor ---
 solana==0.32.0
 solders==0.20.0
 anchorpy==0.19.0
-
-# --- Dependências de Produção (não incluir testes) ---
-# (Nenhuma dependência adicional necessária)

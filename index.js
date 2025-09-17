@@ -35,12 +35,12 @@ const program = new Program(idl, programId, provider);
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");
 
-// Middleware de erro global :cite[2]:cite[6]
+// Middleware de erro global
 app.use((error, req, res, next) => {
     console.error('Erro não tratado:', error);
-    res.status(500).json({ 
+    res.status(500).json({
         error: 'Erro interno do servidor',
-        message: error.message 
+        message: error.message
     });
 });
 
@@ -57,7 +57,7 @@ app.get('/health', (req, res) => {
 app.post('/create-mint-transaction', async (req, res) => {
     try {
         const { buyer_pubkey, event_pubkey, tier_index } = req.body;
-        
+
         if (!buyer_pubkey || !event_pubkey || tier_index === undefined) {
             return res.status(400).json({
                 error: 'Parâmetros obrigatórios: buyer_pubkey, event_pubkey, tier_index'
@@ -71,19 +71,19 @@ app.post('/create-mint-transaction', async (req, res) => {
         // Gera um novo keypair para o mint
         const newMintKeypair = Keypair.generate();
 
-        // Calcula todas as PDAs necessárias :cite[4]
+        // Calcula todas as PDAs necessárias
         const [globalConfigPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("config")], 
+            [Buffer.from("config")],
             programId
         );
 
         const [refundReservePDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("refund_reserve"), eventPubkey.toBuffer()], 
+            [Buffer.from("refund_reserve"), eventPubkey.toBuffer()],
             programId
         );
 
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()], 
+            [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()],
             programId
         );
 
@@ -107,7 +107,7 @@ app.post('/create-mint-transaction', async (req, res) => {
             programId
         );
 
-        // Cria a transação usando Anchor :cite[5]
+        // Cria a transação usando Anchor
         const tx = await program.methods
             .mintTicket(tierIndex)
             .accounts({
@@ -152,9 +152,9 @@ app.post('/create-mint-transaction', async (req, res) => {
 
     } catch (error) {
         console.error('Erro em /create-mint-transaction:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             error: 'Falha ao criar transação',
-            message: error.message 
+            message: error.message
         });
     }
 });
@@ -163,7 +163,7 @@ app.post('/create-mint-transaction', async (req, res) => {
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {
         const { signed_transaction } = req.body;
-        
+
         if (!signed_transaction) {
             return res.status(400).json({
                 error: 'Parâmetro signed_transaction é obrigatório'
@@ -198,14 +198,14 @@ app.post('/finalize-mint-transaction', async (req, res) => {
 
     } catch (error) {
         console.error('Erro em /finalize-mint-transaction:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             error: 'Falha ao finalizar transação',
-            message: error.message 
+            message: error.message
         });
     }
 });
 
-// Handler para rotas não encontradas :cite[6]
+// Handler para rotas não encontradas
 app.use('*', (req, res) => {
     res.status(404).json({ error: 'Rota não encontrada' });
 });
@@ -213,13 +213,13 @@ app.use('*', (req, res) => {
 // Configuração de porta e inicialização
 const PORT = process.env.PORT || 5001;
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 API Gasless rodando na porta ${PORT}`);
     console.log(`📍 Fee Payer: ${feePayer.publicKey.toString()}`);
     console.log(`🌐 RPC: ${RPC_URL}`);
 });
 
-// Handlers para encerramento graceful :cite[3]:cite[6]
+// Handlers para encerramento graceful
 process.on('SIGINT', () => {
     console.log('🛑 Recebido SIGINT. Encerrando graceful...');
     process.exit(0);
@@ -230,12 +230,12 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
-// Handler para rejeições de promessas não tratadas :cite[2]:cite[8]
+// Handler para rejeições de promessas não tratadas
 process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Rejeição de promessa não tratada:', reason);
 });
 
-// Handler para exceções não capturadas :cite[2]:cite[8]
+// Handler para exceções não capturadas
 process.on('uncaughtException', (error) => {
     console.error('❌ Exceção não capturada:', error);
     process.exit(1);

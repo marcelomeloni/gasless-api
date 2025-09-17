@@ -1,9 +1,21 @@
 const express = require('express');
 const cors = require('cors');
-// ✅ ADICIONADO: TransactionMessage e VersionedTransaction
-const { Connection, PublicKey, Keypair, SystemProgram, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
-const { Program, AnchorProvider } = require('@coral-xyz/anchor');
-const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const { 
+    Connection, 
+    PublicKey, 
+    Keypair, 
+    SystemProgram, 
+    TransactionMessage, 
+    VersionedTransaction 
+} = require('@solana/web3.js');
+const { Program, AnchorProvider, BN } = require('@coral-xyz/anchor');
+const { 
+    getAssociatedTokenAddress, 
+    TOKEN_PROGRAM_ID, 
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    createInitializeMintInstruction, // << Importante
+    MINT_SIZE                   // << Importante
+} = require('@solana/spl-token');
 require('dotenv').config();
 
 const app = express();
@@ -25,14 +37,17 @@ const feePayer = Keypair.fromSeed(Buffer.from(SEED_PHRASE).slice(0, 32));
 const connection = new Connection(RPC_URL, 'confirmed');
 const provider = new AnchorProvider(connection, { publicKey: feePayer.publicKey, signer: feePayer }, { commitment: 'confirmed' });
 const idl = require('./idl/ticketing_system.json');
-const programId = new PublicKey("2RLV8dpNAM7SgNxuetYhJJneEFnRfwmbz16jpAJ8EUUg");
+const programId = new PublicKey("2RLV8dpNAM7SgNxuetYhJJneEFnRfwmbz16jpAJ8EUUg"); // ✅ ID CORRETO
 const program = new Program(idl, programId, provider);
 
 // --- Constantes de Programas ---
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");
 
-// --- Middlewares e Rotas ---
+
+// ====================================================================
+// --- ROTAS DA API ---
+// ====================================================================
 
 // Rota de Health Check
 app.get('/health', (req, res) => {
@@ -43,12 +58,8 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Endpoint para criar a transação de mint (versão corrigida)
-// No seu arquivo index.js da API
-const { BN } = require('@coral-xyz/anchor'); // Adicione BN aos imports do anchor
 
-// ... resto do código ...
-
+// Endpoint para criar a transação de mint
 app.post('/create-mint-transaction', async (req, res) => {
     try {
         const { buyer_pubkey, event_id, tier_index } = req.body;
@@ -61,7 +72,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         const eventIdBN = new BN(event_id);
         const tierIndex = parseInt(tier_index);
 
-        // --- Geração de PDAs (mesma lógica que você já tem) ---
+        // --- Geração de Chaves e PDAs ---
         const [eventPDA] = await PublicKey.findProgramAddress([Buffer.from("event"), eventIdBN.toBuffer('le', 8)], programId);
         const newMintKeypair = Keypair.generate();
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress([Buffer.from("buyer_ticket_count"), eventPDA.toBuffer(), buyerPubkey.toBuffer()], programId);
@@ -70,36 +81,33 @@ app.post('/create-mint-transaction', async (req, res) => {
         const [metadataPDA] = await PublicKey.findProgramAddress([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), newMintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
         const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
         const [ticketPDA] = await PublicKey.findProgramAddress([Buffer.from("ticket"), eventPDA.toBuffer(), newMintKeypair.publicKey.toBuffer()], programId);
-
-        // ====================================================================
-        // ✅ CORREÇÃO PRINCIPAL: CALCULAR O RENT TOTAL E PRÉ-FINANCIAR O USUÁRIO
-        // ====================================================================
         
-        // 1. Pegar o saldo atual do comprador
-        const buyerBalance = await connection.getBalance(buyerPubkey);
-        
-        // 2. Calcular o rent necessário para as contas principais que o programa cria.
-        //    O erro nos disse que o total era 1461600, vamos usar isso para ser preciso.
-        //    Uma abordagem mais dinâmica seria calcular para cada conta, mas usar o valor do log é seguro neste caso.
-        const totalRentNeeded = 1461600; // Valor exato que o log de erro pediu!
-
+        // --- LÓGICA CORRETA E FINAL ---
         const instructions = [];
-        
-        // 3. Adicionar uma instrução de transferência se o usuário não tiver o valor necessário.
-        if (buyerBalance < totalRentNeeded) {
-            const amountToTransfer = totalRentNeeded - buyerBalance;
-            console.log(`Usuário precisa de ${totalRentNeeded}, tem ${buyerBalance}. Transferindo ${amountToTransfer} lamports.`);
-            
-            instructions.push(
-                SystemProgram.transfer({
-                    fromPubkey: feePayer.publicKey,
-                    toPubkey: buyerPubkey,
-                    lamports: amountToTransfer
-                })
-            );
-        }
+        const lamportsForMint = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
-        // 4. Adicionar a instrução principal de mint DEPOIS da transferência
+        // 1. Criar a conta do mint, paga pelo feePayer
+        instructions.push(
+            SystemProgram.createAccount({
+                fromPubkey: feePayer.publicKey,
+                newAccountPubkey: newMintKeypair.publicKey,
+                space: MINT_SIZE,
+                lamports: lamportsForMint,
+                programId: TOKEN_PROGRAM_ID,
+            })
+        );
+
+        // 2. Inicializar a conta como um mint, definindo o 'buyer' como autoridade
+        instructions.push(
+            createInitializeMintInstruction(
+                newMintKeypair.publicKey,
+                0, // 0 casas decimais para um NFT
+                buyerPubkey, // A autoridade do mint DEVE ser o comprador
+                buyerPubkey  // A autoridade de freeze DEVE ser o comprador
+            )
+        );
+
+        // 3. Chamar a instrução principal do programa
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
@@ -122,16 +130,16 @@ app.post('/create-mint-transaction', async (req, res) => {
 
         instructions.push(mintInstruction);
 
-        // --- Montagem e assinatura da transação (mesma lógica que você já tem) ---
+        // --- Montagem e assinatura da transação ---
         const { blockhash } = await connection.getLatestBlockhash();
         const messageV0 = new TransactionMessage({
             payerKey: feePayer.publicKey,
             recentBlockhash: blockhash,
-            instructions: instructions, // Usando o array de instruções que montamos
+            instructions: instructions,
         }).compileToV0Message();
 
         const versionedTx = new VersionedTransaction(messageV0);
-        versionedTx.sign([feePayer, newMintKeypair]);
+        versionedTx.sign([feePayer, newMintKeypair]); // Assinado pelo pagador e pela nova conta de mint
 
         const serializedTx = versionedTx.serialize();
         const base64Tx = Buffer.from(serializedTx).toString('base64');
@@ -147,6 +155,8 @@ app.post('/create-mint-transaction', async (req, res) => {
         res.status(500).json({ error: 'Falha ao criar transação', message: error.message, details: error.logs });
     }
 });
+
+
 // Endpoint para finalizar a transação (não precisa de alterações)
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {
@@ -155,16 +165,13 @@ app.post('/finalize-mint-transaction', async (req, res) => {
             return res.status(400).json({ error: 'Parâmetro signed_transaction é obrigatório' });
         }
 
-        // Desserializa a transação. O método .from() é inteligente e lida com Versioned Transactions.
         const transactionBuffer = Buffer.from(signed_transaction, 'base64');
         
-        // Envia a transação para a blockchain
         const signature = await connection.sendRawTransaction(
             transactionBuffer, 
             { skipPreflight: false, preflightCommitment: 'confirmed' }
         );
 
-        // Confirma a transação
         await connection.confirmTransaction(signature, 'confirmed');
         
         res.json({
@@ -185,7 +192,7 @@ app.post('/finalize-mint-transaction', async (req, res) => {
 
 // Handler para rotas não encontradas
 app.use('*', (req, res) => {
-    res.status(4404).json({ error: 'Rota não encontrada' });
+    res.status(404).json({ error: 'Rota não encontrada' }); // ✅ Corrigido para 404
 });
 
 // Middleware de erro global

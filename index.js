@@ -73,7 +73,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         
         // ✅ CORRIGIDO: Ordem das seeds ajustada para (comprador, depois evento) para evitar erros
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_count"), buyerPubkey.toBuffer(), eventPubkey.toBuffer()],
+            [Buffer.from("buyer_ticket_count"), buyerPubkey.toBuffer(), eventPubkey.toBuffer()],
             programId
         );
         

@@ -10,7 +10,9 @@ from solders.keypair import Keypair
 from solders.system_program import ID as SYS_PROGRAM_ID
 from solana.rpc.async_api import AsyncClient
 from solana.transaction import Transaction
-from anchorpy import Program, Provider, Idl
+from anchorpy.program.core import Program
+from anchorpy.provider import Provider
+from anchorpy.idl import Idl
 from anchorpy.error import AnchorError
 
 # Carrega variáveis de ambiente do arquivo .env (essencial para desenvolvimento local)
@@ -217,4 +219,5 @@ if __name__ == '__main__':
     # O Gunicorn (usado no Render) vai rodar o objeto 'app'.
     # Esta parte agora é apenas para testes locais.
     port = int(os.environ.get('PORT', 5001))
+
     app.run(host='0.0.0.0', port=port)

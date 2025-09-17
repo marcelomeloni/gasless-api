@@ -13,8 +13,8 @@ const {
     getAssociatedTokenAddress, 
     TOKEN_PROGRAM_ID, 
     ASSOCIATED_TOKEN_PROGRAM_ID,
-    createInitializeMintInstruction, // << Importante
-    MINT_SIZE                   // << Importante
+    createInitializeMintInstruction,
+    MINT_SIZE
 } = require('@solana/spl-token');
 require('dotenv').config();
 
@@ -37,13 +37,12 @@ const feePayer = Keypair.fromSeed(Buffer.from(SEED_PHRASE).slice(0, 32));
 const connection = new Connection(RPC_URL, 'confirmed');
 const provider = new AnchorProvider(connection, { publicKey: feePayer.publicKey, signer: feePayer }, { commitment: 'confirmed' });
 const idl = require('./idl/ticketing_system.json');
-const programId = new PublicKey("2RLV8dpNAM7SgNxuetYhJJneEFnRfwmbz16jpAJ8EUUg"); // ✅ ID CORRETO
+const programId = new PublicKey("2RLV8dpNAM7SgNxuetYhJJneEFnRfwmbz16jpAJ8EUUg");
 const program = new Program(idl, programId, provider);
 
 // --- Constantes de Programas ---
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");
-
 
 // ====================================================================
 // --- ROTAS DA API ---
@@ -58,8 +57,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-
-// Endpoint para criar a transação de mint
+// Endpoint para criar a transação de mint (Versão Definitiva)
 app.post('/create-mint-transaction', async (req, res) => {
     try {
         const { buyer_pubkey, event_id, tier_index } = req.body;
@@ -72,7 +70,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         const eventIdBN = new BN(event_id);
         const tierIndex = parseInt(tier_index);
 
-        // --- Geração de Chaves e PDAs (permanece igual) ---
+        // --- Geração de Chaves e PDAs ---
         const [eventPDA] = await PublicKey.findProgramAddress([Buffer.from("event"), eventIdBN.toBuffer('le', 8)], programId);
         const newMintKeypair = Keypair.generate();
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress([Buffer.from("buyer_ticket_count"), eventPDA.toBuffer(), buyerPubkey.toBuffer()], programId);
@@ -85,7 +83,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         const instructions = [];
         const lamportsForMint = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
-        // 1. Criar a conta do mint (permanece igual)
+        // 1. Criar a conta do mint (paga pelo feePayer)
         instructions.push(
             SystemProgram.createAccount({
                 fromPubkey: feePayer.publicKey,
@@ -96,48 +94,38 @@ app.post('/create-mint-transaction', async (req, res) => {
             })
         );
 
-        // 2. Inicializar a conta como um mint (permanece igual)
+        // 2. Inicializar a conta como um mint
         instructions.push(
             createInitializeMintInstruction(
                 newMintKeypair.publicKey, 0, buyerPubkey, buyerPubkey
             )
         );
 
-        // ====================================================================
-        // ✅ ADIÇÃO DA TRANSFERÊNCIA DE FUNDOS PARA O RENT RESTANTE ✅
-        // ====================================================================
-        const remainingRentLamports = 1398960; // Valor exato do log de erro
-        const buyerBalance = await connection.getBalance(buyerPubkey);
-        
-        if (buyerBalance < remainingRentLamports) {
-            const amountToTransfer = remainingRentLamports - buyerBalance;
-            instructions.push(
-                SystemProgram.transfer({
-                    fromPubkey: feePayer.publicKey,
-                    toPubkey: buyerPubkey,
-                    lamports: amountToTransfer,
-                })
-            );
-        }
-
-        // 4. Chamar a instrução principal do programa (permanece igual)
+        // 3. Chamar a instrução principal do programa, passando o feePayer
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
-                // ... todas as contas
-                globalConfig: globalConfigPDA, event: eventPDA, refundReserve: refundReservePDA,
-                buyer: buyerPubkey, buyerTicketCount: buyerTicketCountPDA,
-                mintAccount: newMintKeypair.publicKey, metadataAccount: metadataPDA,
-                associatedTokenAccount: ataPDA, tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
-                ticket: ticketPDA
+                globalConfig: globalConfigPDA,
+                event: eventPDA,
+                refundReserve: refundReservePDA,
+                feePayer: feePayer.publicKey, // << Ponto crucial da correção
+                buyer: buyerPubkey,
+                buyerTicketCount: buyerTicketCountPDA,
+                mintAccount: newMintKeypair.publicKey,
+                metadataAccount: metadataPDA,
+                associatedTokenAccount: ataPDA,
+                tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId,
+                rent: SYSVAR_RENT_PUBKEY,
+                ticket: ticketPDA,
             })
             .instruction();
 
         instructions.push(mintInstruction);
 
-        // --- Montagem e assinatura da transação (permanece igual) ---
+        // --- Montagem e assinatura da transação ---
         const { blockhash } = await connection.getLatestBlockhash();
         const messageV0 = new TransactionMessage({
             payerKey: feePayer.publicKey,
@@ -163,8 +151,7 @@ app.post('/create-mint-transaction', async (req, res) => {
     }
 });
 
-
-// Endpoint para finalizar a transação (não precisa de alterações)
+// Endpoint para finalizar a transação
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {
         const { signed_transaction } = req.body;
@@ -196,10 +183,9 @@ app.post('/finalize-mint-transaction', async (req, res) => {
     }
 });
 
-
 // Handler para rotas não encontradas
 app.use('*', (req, res) => {
-    res.status(404).json({ error: 'Rota não encontrada' }); // ✅ Corrigido para 404
+    res.status(404).json({ error: 'Rota não encontrada' });
 });
 
 // Middleware de erro global
@@ -212,7 +198,7 @@ app.use((error, req, res, next) => {
 });
 
 // --- Inicialização do Servidor ---
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 API Gasless rodando na porta ${PORT}`);
     console.log(`📍 Fee Payer: ${feePayer.publicKey.toString()}`);

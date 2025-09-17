@@ -25,7 +25,7 @@ const feePayer = Keypair.fromSeed(Buffer.from(SEED_PHRASE).slice(0, 32));
 const connection = new Connection(RPC_URL, 'confirmed');
 const provider = new AnchorProvider(connection, { publicKey: feePayer.publicKey, signer: feePayer }, { commitment: 'confirmed' });
 const idl = require('./idl/ticketing_system.json');
-const programId = new PublicKey("AEcgrC2sEtWX12zs1m7RemTdcr9QwBkMbJUXfC4oEd2M");
+const programId = new PublicKey("2RLV8dpNAM7SgNxuetYhJJneEFnRfwmbz16jpAJ8EUUg");
 const program = new Program(idl, programId, provider);
 
 // --- Constantes de Programas ---

@@ -11,12 +11,11 @@ from solders.keypair import Keypair
 from solders.system_program import ID as SYS_PROGRAM_ID
 from solana.rpc.async_api import AsyncClient
 from solana.transaction import Transaction
-# Importe Program diretamente do módulo core, não via anchorpy.__init__
+# Importe Program diretamente do módulo core
 from anchorpy.program.core import Program
 from anchorpy.provider import Provider
 from anchorpy.idl import Idl
 from anchorpy.error import AnchorError
-
 # Carrega variáveis de ambiente
 load_dotenv()
 
@@ -122,3 +121,4 @@ def health_check():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port)
+

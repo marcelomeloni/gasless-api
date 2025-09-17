@@ -54,6 +54,7 @@ app.get('/health', (req, res) => {
 });
 
 // Endpoint para criar transação de mint
+// Endpoint para criar transação de mint
 app.post('/create-mint-transaction', async (req, res) => {
     try {
         const { buyer_pubkey, event_pubkey, tier_index } = req.body;
@@ -66,10 +67,12 @@ app.post('/create-mint-transaction', async (req, res) => {
 
         // Verifica se o fee payer tem saldo suficiente
         const feePayerBalance = await connection.getBalance(feePayer.publicKey);
-        if (feePayerBalance < 0.01 * 1e9) {
+        const minBalanceRequired = 0.05 * 1e9; // 0.05 SOL
+
+        if (feePayerBalance < minBalanceRequired) {
             return res.status(500).json({
                 error: 'Fee payer não tem saldo suficiente',
-                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}`
+                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}. Saldo atual: ${feePayerBalance / 1e9} SOL, necessário: ${minBalanceRequired / 1e9} SOL`
             });
         }
 
@@ -80,11 +83,11 @@ app.post('/create-mint-transaction', async (req, res) => {
         // Verifica se a conta do usuário precisa de rent
         const buyerBalance = await connection.getBalance(buyerPubkey);
         const minRentExemption = await connection.getMinimumBalanceForRentExemption(0);
-        
+
         // Gera um novo keypair para o mint
         const newMintKeypair = Keypair.generate();
 
-        // Calcula todas as PDAs necessárias
+        // Calcula todas as PDAs necessárias (CORRIGIDO)
         const [globalConfigPDA] = await PublicKey.findProgramAddress(
             [Buffer.from("config")],
             programId
@@ -96,7 +99,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         );
 
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()],
+            [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()], // CORRIGIDO
             programId
         );
 
@@ -115,6 +118,12 @@ app.post('/create-mint-transaction', async (req, res) => {
             buyerPubkey
         );
 
+        // Calcula o rent necessário para a Associated Token Account
+        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165); // Tamanho padrão de token account
+
+        // Rent total necessário
+        const totalRentNeeded = minRentExemption + ataRentExemption + 5000; // Rent + taxas
+
         const [ticketPDA] = await PublicKey.findProgramAddress(
             [Buffer.from("ticket"), eventPubkey.toBuffer(), newMintKeypair.publicKey.toBuffer()],
             programId
@@ -130,11 +139,11 @@ app.post('/create-mint-transaction', async (req, res) => {
         });
 
         // Adiciona transferência de rent se necessário
-        if (buyerBalance < minRentExemption) {
+        if (buyerBalance < totalRentNeeded) {
             const transferInstruction = SystemProgram.transfer({
                 fromPubkey: feePayer.publicKey,
                 toPubkey: buyerPubkey,
-                lamports: minRentExemption + 5000 // Rent + pequena margem
+                lamports: totalRentNeeded - buyerBalance
             });
             tx.add(transferInstruction);
         }
@@ -177,18 +186,19 @@ app.post('/create-mint-transaction', async (req, res) => {
             transaction: base64Tx,
             mint_public_key: newMintKeypair.publicKey.toString(),
             fee_payer: feePayer.publicKey.toString(),
-            rent_transferred: buyerBalance < minRentExemption
+            rent_transferred: buyerBalance < totalRentNeeded,
+            rent_amount: totalRentNeeded - buyerBalance
         });
 
     } catch (error) {
         console.error('Erro em /create-mint-transaction:', error);
         res.status(500).json({
             error: 'Falha ao criar transação',
-            message: error.message
+            message: error.message,
+            details: error.logs || 'Verifique os logs do servidor para mais detalhes'
         });
     }
 });
-
 // Endpoint para finalizar transação assinada
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {

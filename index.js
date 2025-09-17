@@ -99,7 +99,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         );
 
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()], // CORRIGIDO
+            [Buffer.from("buyer_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()], // CORRIGIDO
             programId
         );
 

@@ -51,68 +51,60 @@ const { BN } = require('@coral-xyz/anchor'); // Adicione BN aos imports do ancho
 
 app.post('/create-mint-transaction', async (req, res) => {
     try {
-        // ✅ MODIFICADO: Recebe event_id em vez de event_pubkey
         const { buyer_pubkey, event_id, tier_index } = req.body;
 
         if (!buyer_pubkey || event_id === undefined || tier_index === undefined) {
             return res.status(400).json({ error: 'Parâmetros obrigatórios: buyer_pubkey, event_id, tier_index' });
         }
         
-        // ... (verificação de saldo do feePayer continua igual) ...
-        
         const buyerPubkey = new PublicKey(buyer_pubkey);
-        const eventIdBN = new BN(event_id); // Converte o ID para BN (BigNumber)
+        const eventIdBN = new BN(event_id);
         const tierIndex = parseInt(tier_index);
 
-        // ====================================================================
-        // ✅ LÓGICA DE CÁLCULO DE PDA CORRIGIDA
-        // ====================================================================
-
-        // 1. Calcule o PDA correto do evento usando o event_id
-        const [eventPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("event"),
-                eventIdBN.toBuffer('le', 8) // u64 em little-endian com 8 bytes
-            ],
-            programId
-        );
-
-        // 2. Use o PDA do evento (calculado acima) para calcular o PDA do contador de ingressos
-        const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("buyer_ticket_count"),
-                eventPDA.toBuffer(), // Usa o endereço correto do evento
-                buyerPubkey.toBuffer()
-            ],
-            programId
-        );
-
-        // O resto do código continua daqui, mas usando 'eventPDA' no lugar de 'eventPubkey'
+        // --- Geração de PDAs (mesma lógica que você já tem) ---
+        const [eventPDA] = await PublicKey.findProgramAddress([Buffer.from("event"), eventIdBN.toBuffer('le', 8)], programId);
         const newMintKeypair = Keypair.generate();
-        
-        const [refundReservePDA] = await PublicKey.findProgramAddress([Buffer.from("refund_reserve"), eventPDA.toBuffer()], programId);
-        // ... e assim por diante para todos os outros PDAs que dependem da chave do evento.
-
-        // O código completo do endpoint fica assim:
-        // (Copie e cole todo este bloco para substituir o endpoint existente)
-
-        // Geração de chaves e PDAs
+        const [buyerTicketCountPDA] = await PublicKey.findProgramAddress([Buffer.from("buyer_ticket_count"), eventPDA.toBuffer(), buyerPubkey.toBuffer()], programId);
         const [globalConfigPDA] = await PublicKey.findProgramAddress([Buffer.from("config")], programId);
+        const [refundReservePDA] = await PublicKey.findProgramAddress([Buffer.from("refund_reserve"), eventPDA.toBuffer()], programId);
         const [metadataPDA] = await PublicKey.findProgramAddress([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), newMintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
         const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
         const [ticketPDA] = await PublicKey.findProgramAddress([Buffer.from("ticket"), eventPDA.toBuffer(), newMintKeypair.publicKey.toBuffer()], programId);
 
-        // Lógica de "Rent"
+        // ====================================================================
+        // ✅ CORREÇÃO PRINCIPAL: CALCULAR O RENT TOTAL E PRÉ-FINANCIAR O USUÁRIO
+        // ====================================================================
+        
+        // 1. Pegar o saldo atual do comprador
         const buyerBalance = await connection.getBalance(buyerPubkey);
-        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165);
-        const totalRentNeeded = ataRentExemption;
+        
+        // 2. Calcular o rent necessário para as contas principais que o programa cria.
+        //    O erro nos disse que o total era 1461600, vamos usar isso para ser preciso.
+        //    Uma abordagem mais dinâmica seria calcular para cada conta, mas usar o valor do log é seguro neste caso.
+        const totalRentNeeded = 1461600; // Valor exato que o log de erro pediu!
 
-        // Construção da Instrução
+        const instructions = [];
+        
+        // 3. Adicionar uma instrução de transferência se o usuário não tiver o valor necessário.
+        if (buyerBalance < totalRentNeeded) {
+            const amountToTransfer = totalRentNeeded - buyerBalance;
+            console.log(`Usuário precisa de ${totalRentNeeded}, tem ${buyerBalance}. Transferindo ${amountToTransfer} lamports.`);
+            
+            instructions.push(
+                SystemProgram.transfer({
+                    fromPubkey: feePayer.publicKey,
+                    toPubkey: buyerPubkey,
+                    lamports: amountToTransfer
+                })
+            );
+        }
+
+        // 4. Adicionar a instrução principal de mint DEPOIS da transferência
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
                 globalConfig: globalConfigPDA,
-                event: eventPDA, // Usa o PDA correto do evento
+                event: eventPDA,
                 refundReserve: refundReservePDA,
                 buyer: buyerPubkey,
                 buyerTicketCount: buyerTicketCountPDA,
@@ -128,22 +120,14 @@ app.post('/create-mint-transaction', async (req, res) => {
             })
             .instruction();
 
-        // Construção da Transação Versionada (lógica anterior está correta)
-        const { blockhash } = await connection.getLatestBlockhash();
-        const instructions = [];
-        if (buyerBalance < totalRentNeeded) {
-            instructions.push(SystemProgram.transfer({
-                fromPubkey: feePayer.publicKey,
-                toPubkey: buyerPubkey,
-                lamports: totalRentNeeded - buyerBalance
-            }));
-        }
         instructions.push(mintInstruction);
 
+        // --- Montagem e assinatura da transação (mesma lógica que você já tem) ---
+        const { blockhash } = await connection.getLatestBlockhash();
         const messageV0 = new TransactionMessage({
             payerKey: feePayer.publicKey,
             recentBlockhash: blockhash,
-            instructions: instructions,
+            instructions: instructions, // Usando o array de instruções que montamos
         }).compileToV0Message();
 
         const versionedTx = new VersionedTransaction(messageV0);

@@ -80,38 +80,39 @@ app.post('/create-mint-transaction', async (req, res) => {
         const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
         const [ticketPDA] = await PublicKey.findProgramAddress([Buffer.from("ticket"), eventPDA.toBuffer(), newMintKeypair.publicKey.toBuffer()], programId);
         
-        const instructions = [];
+       const instructions = [];
         const lamportsForMint = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
         // 1. Criar a conta do mint (paga pelo feePayer)
-        instructions.push(
-            SystemProgram.createAccount({
-                fromPubkey: feePayer.publicKey,
-                newAccountPubkey: newMintKeypair.publicKey,
-                space: MINT_SIZE,
-                lamports: lamportsForMint,
-                programId: TOKEN_PROGRAM_ID,
-            })
-        );
+        const createAccountIx = SystemProgram.createAccount({
+            fromPubkey: feePayer.publicKey,
+            newAccountPubkey: newMintKeypair.publicKey,
+            space: MINT_SIZE,
+            lamports: lamportsForMint,
+            programId: TOKEN_PROGRAM_ID,
+        });
+        instructions.push(createAccountIx);
 
         // 2. Inicializar a conta como um mint
-        instructions.push(
-            createInitializeMintInstruction(
-                newMintKeypair.publicKey, 0, buyerPubkey, buyerPubkey
-            )
+        const initializeMintIx = createInitializeMintInstruction(
+            newMintKeypair.publicKey, 
+            0, 
+            buyerPubkey, // mint authority
+            buyerPubkey  // freeze authority (opcional, pode ser null)
         );
+        instructions.push(initializeMintIx);
 
-        // 3. Chamar a instrução principal do programa, passando o feePayer
+        // 3. Obter a instrução do programa Anchor
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
                 globalConfig: globalConfigPDA,
                 event: eventPDA,
                 refundReserve: refundReservePDA,
-                feePayer: feePayer.publicKey, // << Ponto crucial da correção
+                feePayer: feePayer.publicKey,
                 buyer: buyerPubkey,
                 buyerTicketCount: buyerTicketCountPDA,
-                mintAccount: newMintKeypair.publicKey,
+                mintAccount: newMintKeypair.publicKey, // Já inicializado
                 metadataAccount: metadataPDA,
                 associatedTokenAccount: ataPDA,
                 tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
@@ -122,7 +123,6 @@ app.post('/create-mint-transaction', async (req, res) => {
                 ticket: ticketPDA,
             })
             .instruction();
-
         instructions.push(mintInstruction);
 
         // --- Montagem e assinatura da transação ---

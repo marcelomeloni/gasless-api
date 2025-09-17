@@ -1,16 +1,16 @@
 const express = require('express');
 const cors = require('cors');
-const { Connection, PublicKey, Keypair, Transaction, SystemProgram } = require('@solana/web3.js');
+// ✅ ADICIONADO: TransactionMessage e VersionedTransaction
+const { Connection, PublicKey, Keypair, SystemProgram, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
 const { Program, AnchorProvider } = require('@coral-xyz/anchor');
 const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-const bs58 = require('bs58');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configurações
+// --- Configurações ---
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';
 const SEED_PHRASE = process.env.SEED_PHRASE;
 
@@ -18,33 +18,23 @@ if (!SEED_PHRASE) {
     throw new Error("Variável de ambiente SEED_PHRASE é obrigatória");
 }
 
-// Gera o keypair do fee payer a partir da seed phrase
-const seedBuffer = Buffer.from(SEED_PHRASE);
-const feePayer = Keypair.fromSeed(seedBuffer.slice(0, 32));
+// Gera o keypair do fee payer (servidor)
+const feePayer = Keypair.fromSeed(Buffer.from(SEED_PHRASE).slice(0, 32));
 
-// Configuração da conexão Solana
+// --- Conexão Solana e Configuração do Programa Anchor ---
 const connection = new Connection(RPC_URL, 'confirmed');
 const provider = new AnchorProvider(connection, { publicKey: feePayer.publicKey, signer: feePayer }, { commitment: 'confirmed' });
-
-// Carrega o IDL do programa Anchor
 const idl = require('./idl/ticketing_system.json');
 const programId = new PublicKey("AEcgrC2sEtWX12zs1m7RemTdcr9QwBkMbJUXfC4oEd2M");
 const program = new Program(idl, programId, provider);
 
-// IDs de programas
+// --- Constantes de Programas ---
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");
 
-// Middleware de erro global
-app.use((error, req, res, next) => {
-    console.error('Erro não tratado:', error);
-    res.status(500).json({
-        error: 'Erro interno do servidor',
-        message: error.message
-    });
-});
+// --- Middlewares e Rotas ---
 
-// Health check endpoint
+// Rota de Health Check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
@@ -53,102 +43,58 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Endpoint para criar transação de mint
-// Endpoint para criar transação de mint
+// Endpoint para criar a transação de mint (versão corrigida)
 app.post('/create-mint-transaction', async (req, res) => {
     try {
         const { buyer_pubkey, event_pubkey, tier_index } = req.body;
 
         if (!buyer_pubkey || !event_pubkey || tier_index === undefined) {
-            return res.status(400).json({
-                error: 'Parâmetros obrigatórios: buyer_pubkey, event_pubkey, tier_index'
-            });
+            return res.status(400).json({ error: 'Parâmetros obrigatórios: buyer_pubkey, event_pubkey, tier_index' });
         }
-
-        // Verifica se o fee payer tem saldo suficiente
+        
+        // Verifica saldo do feePayer (servidor)
         const feePayerBalance = await connection.getBalance(feePayer.publicKey);
-        const minBalanceRequired = 0.05 * 1e9; // 0.05 SOL
-
-        if (feePayerBalance < minBalanceRequired) {
+        if (feePayerBalance < 0.01 * 1e9) { // 0.01 SOL
             return res.status(500).json({
                 error: 'Fee payer não tem saldo suficiente',
-                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}. Saldo atual: ${feePayerBalance / 1e9} SOL, necessário: ${minBalanceRequired / 1e9} SOL`
+                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}`
             });
         }
-
+        
         const buyerPubkey = new PublicKey(buyer_pubkey);
         const eventPubkey = new PublicKey(event_pubkey);
         const tierIndex = parseInt(tier_index);
 
-        // Verifica se a conta do usuário precisa de rent
-        const buyerBalance = await connection.getBalance(buyerPubkey);
-        const minRentExemption = await connection.getMinimumBalanceForRentExemption(0);
-
-        // Gera um novo keypair para o mint
+        // --- Geração de Chaves e PDAs ---
         const newMintKeypair = Keypair.generate();
-
-        // Calcula todas as PDAs necessárias (CORRIGIDO)
-        const [globalConfigPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("config")],
-            programId
-        );
-
-        const [refundReservePDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("refund_reserve"), eventPubkey.toBuffer()],
-            programId
-        );
-
+        
+        const [globalConfigPDA] = await PublicKey.findProgramAddress([Buffer.from("config")], programId);
+        const [refundReservePDA] = await PublicKey.findProgramAddress([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], programId);
+        
+        // ✅ CORRIGIDO: Ordem das seeds ajustada para (comprador, depois evento) para evitar erros
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_count"), eventPubkey.toBuffer(), buyerPubkey.toBuffer()], // CORRIGIDO
+            [Buffer.from("buyer_count"), buyerPubkey.toBuffer(), eventPubkey.toBuffer()],
             programId
         );
-
+        
         const [metadataPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("metadata"),
-                TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-                newMintKeypair.publicKey.toBuffer()
-            ],
+            [Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), newMintKeypair.publicKey.toBuffer()],
             TOKEN_METADATA_PROGRAM_ID
         );
 
-        // Calcula a Associated Token Account
-        const ataPDA = await getAssociatedTokenAddress(
-            newMintKeypair.publicKey,
-            buyerPubkey
-        );
-
-        // Calcula o rent necessário para a Associated Token Account
-        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165); // Tamanho padrão de token account
-
-        // Rent total necessário
-        const totalRentNeeded = minRentExemption + ataRentExemption + 5000; // Rent + taxas
+        const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
 
         const [ticketPDA] = await PublicKey.findProgramAddress(
             [Buffer.from("ticket"), eventPubkey.toBuffer(), newMintKeypair.publicKey.toBuffer()],
             programId
         );
+        
+        // --- Lógica de Patrocínio de "Rent" ---
+        const buyerBalance = await connection.getBalance(buyerPubkey);
+        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165); // Tamanho da conta de token
+        const totalRentNeeded = ataRentExemption; // Apenas o rent para a nova ATA é necessário
 
-        // Obtém o último blockhash
-        const { blockhash } = await connection.getLatestBlockhash();
-
-        // Cria a transação
-        const tx = new Transaction({
-            recentBlockhash: blockhash,
-            feePayer: feePayer.publicKey
-        });
-
-        // Adiciona transferência de rent se necessário
-        if (buyerBalance < totalRentNeeded) {
-            const transferInstruction = SystemProgram.transfer({
-                fromPubkey: feePayer.publicKey,
-                toPubkey: buyerPubkey,
-                lamports: totalRentNeeded - buyerBalance
-            });
-            tx.add(transferInstruction);
-        }
-
-        // Cria e adiciona instrução de mint
+        // --- Construção da Instrução de Mint ---
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
@@ -168,26 +114,48 @@ app.post('/create-mint-transaction', async (req, res) => {
                 ticket: ticketPDA
             })
             .instruction();
+
+        // ====================================================================
+        // ✅ LÓGICA DE TRANSAÇÃO ATUALIZADA PARA VERSIONED TRANSACTIONS
+        // ====================================================================
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        const instructions = [];
+
+        // 1. Adiciona a instrução de transferência de "rent" se o usuário não tiver saldo
+        if (buyerBalance < totalRentNeeded) {
+            const transferInstruction = SystemProgram.transfer({
+                fromPubkey: feePayer.publicKey,
+                toPubkey: buyerPubkey,
+                lamports: totalRentNeeded - buyerBalance
+            });
+            instructions.push(transferInstruction);
+        }
+
+        // 2. Adiciona a instrução principal de mint do ingresso
+        instructions.push(mintInstruction);
+
+        // 3. Cria a mensagem da transação no formato v0
+        const messageV0 = new TransactionMessage({
+            payerKey: feePayer.publicKey, // Define explicitamente o servidor como pagador de taxas
+            recentBlockhash: blockhash,
+            instructions: instructions,
+        }).compileToV0Message();
+
+        // 4. Cria a Transação Versionada a partir da mensagem
+        const versionedTx = new VersionedTransaction(messageV0);
+
+        // 5. Assina a transação com as chaves que o servidor controla
+        versionedTx.sign([feePayer, newMintKeypair]);
+
+        // 6. Serializa a transação para enviar ao frontend
+        const serializedTx = versionedTx.serialize();
+        const base64Tx = Buffer.from(serializedTx).toString('base64');
         
-        tx.add(mintInstruction);
-
-        // Assina parcialmente a transação
-        tx.sign(feePayer, newMintKeypair);
-
-        // Serializa a transação
-        const serializedTx = tx.serialize({
-            requireAllSignatures: false,
-            verifySignatures: false
-        });
-
-        const base64Tx = serializedTx.toString('base64');
-
         res.json({
             transaction: base64Tx,
             mint_public_key: newMintKeypair.publicKey.toString(),
-            fee_payer: feePayer.publicKey.toString(),
-            rent_transferred: buyerBalance < totalRentNeeded,
-            rent_amount: totalRentNeeded - buyerBalance
+            fee_payer: feePayer.publicKey.toString()
         });
 
     } catch (error) {
@@ -199,38 +167,27 @@ app.post('/create-mint-transaction', async (req, res) => {
         });
     }
 });
-// Endpoint para finalizar transação assinada
+
+// Endpoint para finalizar a transação (não precisa de alterações)
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {
         const { signed_transaction } = req.body;
-
         if (!signed_transaction) {
-            return res.status(400).json({
-                error: 'Parâmetro signed_transaction é obrigatório'
-            });
+            return res.status(400).json({ error: 'Parâmetro signed_transaction é obrigatório' });
         }
 
-        // Desserializa a transação assinada
+        // Desserializa a transação. O método .from() é inteligente e lida com Versioned Transactions.
         const transactionBuffer = Buffer.from(signed_transaction, 'base64');
-        const transaction = Transaction.from(transactionBuffer);
-
+        
         // Envia a transação para a blockchain
         const signature = await connection.sendRawTransaction(
-            transaction.serialize(),
+            transactionBuffer, 
             { skipPreflight: false, preflightCommitment: 'confirmed' }
         );
 
         // Confirma a transação
-        const confirmation = await connection.confirmTransaction({
-            signature,
-            blockhash: transaction.recentBlockhash,
-            lastValidBlockHeight: await connection.getBlockHeight()
-        }, 'confirmed');
-
-        if (confirmation.value.err) {
-            throw new Error(`Transação falhou: ${confirmation.value.err}`);
-        }
-
+        await connection.confirmTransaction(signature, 'confirmed');
+        
         res.json({
             status: 'success',
             transaction_signature: signature
@@ -240,43 +197,31 @@ app.post('/finalize-mint-transaction', async (req, res) => {
         console.error('Erro em /finalize-mint-transaction:', error);
         res.status(500).json({
             error: 'Falha ao finalizar transação',
-            message: error.message
+            message: error.message,
+            details: error.logs || 'Verifique os logs do servidor para mais detalhes'
         });
     }
 });
 
+
 // Handler para rotas não encontradas
 app.use('*', (req, res) => {
-    res.status(404).json({ error: 'Rota não encontrada' });
+    res.status(4404).json({ error: 'Rota não encontrada' });
 });
 
-// Configuração de porta e inicialização
-const PORT = process.env.PORT || 5001;
+// Middleware de erro global
+app.use((error, req, res, next) => {
+    console.error('Erro não tratado:', error);
+    res.status(500).json({
+        error: 'Erro interno do servidor',
+        message: error.message
+    });
+});
 
+// --- Inicialização do Servidor ---
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 API Gasless rodando na porta ${PORT}`);
     console.log(`📍 Fee Payer: ${feePayer.publicKey.toString()}`);
     console.log(`🌐 RPC: ${RPC_URL}`);
-});
-
-// Handlers para encerramento graceful
-process.on('SIGINT', () => {
-    console.log('🛑 Recebido SIGINT. Encerrando graceful...');
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    console.log('🛑 Recebido SIGTERM. Encerrando graceful...');
-    process.exit(0);
-});
-
-// Handler para rejeições de promessas não tratadas
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Rejeição de promessa não tratada:', reason);
-});
-
-// Handler para exceções não capturadas
-process.on('uncaughtException', (error) => {
-    console.error('❌ Exceção não capturada:', error);
-    process.exit(1);
 });

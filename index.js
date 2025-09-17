@@ -64,10 +64,23 @@ app.post('/create-mint-transaction', async (req, res) => {
             });
         }
 
+        // Verifica se o fee payer tem saldo suficiente
+        const feePayerBalance = await connection.getBalance(feePayer.publicKey);
+        if (feePayerBalance < 0.01 * 1e9) {
+            return res.status(500).json({
+                error: 'Fee payer não tem saldo suficiente',
+                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}`
+            });
+        }
+
         const buyerPubkey = new PublicKey(buyer_pubkey);
         const eventPubkey = new PublicKey(event_pubkey);
         const tierIndex = parseInt(tier_index);
 
+        // Verifica se a conta do usuário precisa de rent
+        const buyerBalance = await connection.getBalance(buyerPubkey);
+        const minRentExemption = await connection.getMinimumBalanceForRentExemption(0);
+        
         // Gera um novo keypair para o mint
         const newMintKeypair = Keypair.generate();
 
@@ -107,8 +120,27 @@ app.post('/create-mint-transaction', async (req, res) => {
             programId
         );
 
-        // Cria a transação usando Anchor
-        const tx = await program.methods
+        // Obtém o último blockhash
+        const { blockhash } = await connection.getLatestBlockhash();
+
+        // Cria a transação
+        const tx = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: feePayer.publicKey
+        });
+
+        // Adiciona transferência de rent se necessário
+        if (buyerBalance < minRentExemption) {
+            const transferInstruction = SystemProgram.transfer({
+                fromPubkey: feePayer.publicKey,
+                toPubkey: buyerPubkey,
+                lamports: minRentExemption + 5000 // Rent + pequena margem
+            });
+            tx.add(transferInstruction);
+        }
+
+        // Cria e adiciona instrução de mint
+        const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
                 globalConfig: globalConfigPDA,
@@ -126,17 +158,14 @@ app.post('/create-mint-transaction', async (req, res) => {
                 rent: SYSVAR_RENT_PUBKEY,
                 ticket: ticketPDA
             })
-            .transaction();
+            .instruction();
+        
+        tx.add(mintInstruction);
 
-        // Configura o blockhash e fee payer
-        const { blockhash } = await connection.getLatestBlockhash();
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = feePayer.publicKey;
-
-        // Assina parcialmente a transação (apenas com o fee payer e o novo mint)
+        // Assina parcialmente a transação
         tx.sign(feePayer, newMintKeypair);
 
-        // Serializa a transação (sem todas as assinaturas)
+        // Serializa a transação
         const serializedTx = tx.serialize({
             requireAllSignatures: false,
             verifySignatures: false
@@ -147,7 +176,8 @@ app.post('/create-mint-transaction', async (req, res) => {
         res.json({
             transaction: base64Tx,
             mint_public_key: newMintKeypair.publicKey.toString(),
-            fee_payer: feePayer.publicKey.toString()
+            fee_payer: feePayer.publicKey.toString(),
+            rent_transferred: buyerBalance < minRentExemption
         });
 
     } catch (error) {

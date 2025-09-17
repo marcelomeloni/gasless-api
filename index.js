@@ -72,7 +72,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         const eventIdBN = new BN(event_id);
         const tierIndex = parseInt(tier_index);
 
-        // --- Geração de Chaves e PDAs ---
+        // --- Geração de Chaves e PDAs (permanece igual) ---
         const [eventPDA] = await PublicKey.findProgramAddress([Buffer.from("event"), eventIdBN.toBuffer('le', 8)], programId);
         const newMintKeypair = Keypair.generate();
         const [buyerTicketCountPDA] = await PublicKey.findProgramAddress([Buffer.from("buyer_ticket_count"), eventPDA.toBuffer(), buyerPubkey.toBuffer()], programId);
@@ -82,11 +82,10 @@ app.post('/create-mint-transaction', async (req, res) => {
         const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
         const [ticketPDA] = await PublicKey.findProgramAddress([Buffer.from("ticket"), eventPDA.toBuffer(), newMintKeypair.publicKey.toBuffer()], programId);
         
-        // --- LÓGICA CORRETA E FINAL ---
         const instructions = [];
         const lamportsForMint = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
-        // 1. Criar a conta do mint, paga pelo feePayer
+        // 1. Criar a conta do mint (permanece igual)
         instructions.push(
             SystemProgram.createAccount({
                 fromPubkey: feePayer.publicKey,
@@ -97,40 +96,48 @@ app.post('/create-mint-transaction', async (req, res) => {
             })
         );
 
-        // 2. Inicializar a conta como um mint, definindo o 'buyer' como autoridade
+        // 2. Inicializar a conta como um mint (permanece igual)
         instructions.push(
             createInitializeMintInstruction(
-                newMintKeypair.publicKey,
-                0, // 0 casas decimais para um NFT
-                buyerPubkey, // A autoridade do mint DEVE ser o comprador
-                buyerPubkey  // A autoridade de freeze DEVE ser o comprador
+                newMintKeypair.publicKey, 0, buyerPubkey, buyerPubkey
             )
         );
 
-        // 3. Chamar a instrução principal do programa
+        // ====================================================================
+        // ✅ ADIÇÃO DA TRANSFERÊNCIA DE FUNDOS PARA O RENT RESTANTE ✅
+        // ====================================================================
+        const remainingRentLamports = 1398960; // Valor exato do log de erro
+        const buyerBalance = await connection.getBalance(buyerPubkey);
+        
+        if (buyerBalance < remainingRentLamports) {
+            const amountToTransfer = remainingRentLamports - buyerBalance;
+            instructions.push(
+                SystemProgram.transfer({
+                    fromPubkey: feePayer.publicKey,
+                    toPubkey: buyerPubkey,
+                    lamports: amountToTransfer,
+                })
+            );
+        }
+
+        // 4. Chamar a instrução principal do programa (permanece igual)
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
-                globalConfig: globalConfigPDA,
-                event: eventPDA,
-                refundReserve: refundReservePDA,
-                buyer: buyerPubkey,
-                buyerTicketCount: buyerTicketCountPDA,
-                mintAccount: newMintKeypair.publicKey,
-                metadataAccount: metadataPDA,
-                associatedTokenAccount: ataPDA,
-                tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID,
-                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId,
-                rent: SYSVAR_RENT_PUBKEY,
+                // ... todas as contas
+                globalConfig: globalConfigPDA, event: eventPDA, refundReserve: refundReservePDA,
+                buyer: buyerPubkey, buyerTicketCount: buyerTicketCountPDA,
+                mintAccount: newMintKeypair.publicKey, metadataAccount: metadataPDA,
+                associatedTokenAccount: ataPDA, tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
                 ticket: ticketPDA
             })
             .instruction();
 
         instructions.push(mintInstruction);
 
-        // --- Montagem e assinatura da transação ---
+        // --- Montagem e assinatura da transação (permanece igual) ---
         const { blockhash } = await connection.getLatestBlockhash();
         const messageV0 = new TransactionMessage({
             payerKey: feePayer.publicKey,
@@ -139,7 +146,7 @@ app.post('/create-mint-transaction', async (req, res) => {
         }).compileToV0Message();
 
         const versionedTx = new VersionedTransaction(messageV0);
-        versionedTx.sign([feePayer, newMintKeypair]); // Assinado pelo pagador e pela nova conta de mint
+        versionedTx.sign([feePayer, newMintKeypair]);
 
         const serializedTx = versionedTx.serialize();
         const base64Tx = Buffer.from(serializedTx).toString('base64');

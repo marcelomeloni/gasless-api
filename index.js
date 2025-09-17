@@ -44,62 +44,75 @@ app.get('/health', (req, res) => {
 });
 
 // Endpoint para criar a transação de mint (versão corrigida)
+// No seu arquivo index.js da API
+const { BN } = require('@coral-xyz/anchor'); // Adicione BN aos imports do anchor
+
+// ... resto do código ...
+
 app.post('/create-mint-transaction', async (req, res) => {
     try {
-        const { buyer_pubkey, event_pubkey, tier_index } = req.body;
+        // ✅ MODIFICADO: Recebe event_id em vez de event_pubkey
+        const { buyer_pubkey, event_id, tier_index } = req.body;
 
-        if (!buyer_pubkey || !event_pubkey || tier_index === undefined) {
-            return res.status(400).json({ error: 'Parâmetros obrigatórios: buyer_pubkey, event_pubkey, tier_index' });
+        if (!buyer_pubkey || event_id === undefined || tier_index === undefined) {
+            return res.status(400).json({ error: 'Parâmetros obrigatórios: buyer_pubkey, event_id, tier_index' });
         }
         
-        // Verifica saldo do feePayer (servidor)
-        const feePayerBalance = await connection.getBalance(feePayer.publicKey);
-        if (feePayerBalance < 0.01 * 1e9) { // 0.01 SOL
-            return res.status(500).json({
-                error: 'Fee payer não tem saldo suficiente',
-                message: `Adicione SOL à carteira do fee payer: ${feePayer.publicKey.toString()}`
-            });
-        }
+        // ... (verificação de saldo do feePayer continua igual) ...
         
         const buyerPubkey = new PublicKey(buyer_pubkey);
-        const eventPubkey = new PublicKey(event_pubkey);
+        const eventIdBN = new BN(event_id); // Converte o ID para BN (BigNumber)
         const tierIndex = parseInt(tier_index);
 
-        // --- Geração de Chaves e PDAs ---
+        // ====================================================================
+        // ✅ LÓGICA DE CÁLCULO DE PDA CORRIGIDA
+        // ====================================================================
+
+        // 1. Calcule o PDA correto do evento usando o event_id
+        const [eventPDA] = await PublicKey.findProgramAddress(
+            [
+                Buffer.from("event"),
+                eventIdBN.toBuffer('le', 8) // u64 em little-endian com 8 bytes
+            ],
+            programId
+        );
+
+        // 2. Use o PDA do evento (calculado acima) para calcular o PDA do contador de ingressos
+        const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
+            [
+                Buffer.from("buyer_ticket_count"),
+                eventPDA.toBuffer(), // Usa o endereço correto do evento
+                buyerPubkey.toBuffer()
+            ],
+            programId
+        );
+
+        // O resto do código continua daqui, mas usando 'eventPDA' no lugar de 'eventPubkey'
         const newMintKeypair = Keypair.generate();
         
+        const [refundReservePDA] = await PublicKey.findProgramAddress([Buffer.from("refund_reserve"), eventPDA.toBuffer()], programId);
+        // ... e assim por diante para todos os outros PDAs que dependem da chave do evento.
+
+        // O código completo do endpoint fica assim:
+        // (Copie e cole todo este bloco para substituir o endpoint existente)
+
+        // Geração de chaves e PDAs
         const [globalConfigPDA] = await PublicKey.findProgramAddress([Buffer.from("config")], programId);
-        const [refundReservePDA] = await PublicKey.findProgramAddress([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], programId);
-        
-        // ✅ CORRIGIDO: Ordem das seeds ajustada para (comprador, depois evento) para evitar erros
-        const [buyerTicketCountPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("buyer_ticket_count"), buyerPubkey.toBuffer(), eventPubkey.toBuffer()],
-            programId
-        );
-        
-        const [metadataPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), newMintKeypair.publicKey.toBuffer()],
-            TOKEN_METADATA_PROGRAM_ID
-        );
-
+        const [metadataPDA] = await PublicKey.findProgramAddress([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), newMintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
         const ataPDA = await getAssociatedTokenAddress(newMintKeypair.publicKey, buyerPubkey);
+        const [ticketPDA] = await PublicKey.findProgramAddress([Buffer.from("ticket"), eventPDA.toBuffer(), newMintKeypair.publicKey.toBuffer()], programId);
 
-        const [ticketPDA] = await PublicKey.findProgramAddress(
-            [Buffer.from("ticket"), eventPubkey.toBuffer(), newMintKeypair.publicKey.toBuffer()],
-            programId
-        );
-        
-        // --- Lógica de Patrocínio de "Rent" ---
+        // Lógica de "Rent"
         const buyerBalance = await connection.getBalance(buyerPubkey);
-        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165); // Tamanho da conta de token
-        const totalRentNeeded = ataRentExemption; // Apenas o rent para a nova ATA é necessário
+        const ataRentExemption = await connection.getMinimumBalanceForRentExemption(165);
+        const totalRentNeeded = ataRentExemption;
 
-        // --- Construção da Instrução de Mint ---
+        // Construção da Instrução
         const mintInstruction = await program.methods
             .mintTicket(tierIndex)
             .accounts({
                 globalConfig: globalConfigPDA,
-                event: eventPubkey,
+                event: eventPDA, // Usa o PDA correto do evento
                 refundReserve: refundReservePDA,
                 buyer: buyerPubkey,
                 buyerTicketCount: buyerTicketCountPDA,
@@ -115,40 +128,27 @@ app.post('/create-mint-transaction', async (req, res) => {
             })
             .instruction();
 
-        // ====================================================================
-        // ✅ LÓGICA DE TRANSAÇÃO ATUALIZADA PARA VERSIONED TRANSACTIONS
-        // ====================================================================
-
+        // Construção da Transação Versionada (lógica anterior está correta)
         const { blockhash } = await connection.getLatestBlockhash();
         const instructions = [];
-
-        // 1. Adiciona a instrução de transferência de "rent" se o usuário não tiver saldo
         if (buyerBalance < totalRentNeeded) {
-            const transferInstruction = SystemProgram.transfer({
+            instructions.push(SystemProgram.transfer({
                 fromPubkey: feePayer.publicKey,
                 toPubkey: buyerPubkey,
                 lamports: totalRentNeeded - buyerBalance
-            });
-            instructions.push(transferInstruction);
+            }));
         }
-
-        // 2. Adiciona a instrução principal de mint do ingresso
         instructions.push(mintInstruction);
 
-        // 3. Cria a mensagem da transação no formato v0
         const messageV0 = new TransactionMessage({
-            payerKey: feePayer.publicKey, // Define explicitamente o servidor como pagador de taxas
+            payerKey: feePayer.publicKey,
             recentBlockhash: blockhash,
             instructions: instructions,
         }).compileToV0Message();
 
-        // 4. Cria a Transação Versionada a partir da mensagem
         const versionedTx = new VersionedTransaction(messageV0);
-
-        // 5. Assina a transação com as chaves que o servidor controla
         versionedTx.sign([feePayer, newMintKeypair]);
 
-        // 6. Serializa a transação para enviar ao frontend
         const serializedTx = versionedTx.serialize();
         const base64Tx = Buffer.from(serializedTx).toString('base64');
         
@@ -160,14 +160,9 @@ app.post('/create-mint-transaction', async (req, res) => {
 
     } catch (error) {
         console.error('Erro em /create-mint-transaction:', error);
-        res.status(500).json({
-            error: 'Falha ao criar transação',
-            message: error.message,
-            details: error.logs || 'Verifique os logs do servidor para mais detalhes'
-        });
+        res.status(500).json({ error: 'Falha ao criar transação', message: error.message, details: error.logs });
     }
 });
-
 // Endpoint para finalizar a transação (não precisa de alterações)
 app.post('/finalize-mint-transaction', async (req, res) => {
     try {

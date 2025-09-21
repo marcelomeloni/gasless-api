@@ -313,9 +313,67 @@ app.post('/mint-for-existing-user', async (req, res) => {
         res.status(500).json({ error: "Erro no servidor ao mintar para usuário existente.", details: errorDetails });
     }
 });
+// ====================================================================
+// --- Endpoint 5: BUSCAR INGRESSOS VALIDADOS DE UM EVENTO ---
+// ====================================================================
+app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
+    const { eventAddress } = req.params;
+    if (!eventAddress) {
+        return res.status(400).json({ error: "O endereço do evento é obrigatório." });
+    }
+
+    console.log(`[+] Buscando ingressos validados para o evento: ${eventAddress}`);
+    try {
+        const eventPubkey = new PublicKey(eventAddress);
+        
+        // Busca todas as contas 'Ticket' que pertencem a este evento e foram resgatadas
+        const redeemedTickets = await program.account.ticket.all([
+            { memcmp: { offset: 8, bytes: eventPubkey.toBase58() } }, // Filtra pelo evento
+            { memcmp: { offset: 8 + 32 + 32, bytes: bs58.encode([1]) } } // Filtra por redeemed = true
+        ]);
+
+        if (redeemedTickets.length === 0) {
+            return res.status(200).json([]); // Retorna array vazio se nenhum foi validado ainda
+        }
+
+        // Para enriquecer os dados, buscamos o perfil de cada dono
+        const validatedEntries = await Promise.all(redeemedTickets.map(async (ticket) => {
+            try {
+                const [userProfilePda] = PublicKey.findProgramAddressSync(
+                    [Buffer.from("user_profile"), ticket.account.owner.toBuffer()],
+                    program.programId
+                );
+                const userProfile = await program.account.userProfile.fetch(userProfilePda);
+                return {
+                    name: userProfile.name,
+                    redeemedAt: new Date(ticket.account.redeemedAt * 1000).toLocaleTimeString('pt-BR'),
+                    nftMint: ticket.account.nftMint.toString(),
+                };
+            } catch (e) {
+                // Se o perfil não for encontrado, retorna com dados limitados
+                return {
+                    name: "Perfil não encontrado",
+                    redeemedAt: new Date(ticket.account.redeemedAt * 1000).toLocaleTimeString('pt-BR'),
+                    nftMint: ticket.account.nftMint.toString(),
+                };
+            }
+        }));
+        
+        // Ordena pelos mais recentes primeiro
+        const sortedEntries = validatedEntries.sort((a, b) => new Date(b.redeemedAt) - new Date(a.redeemedAt));
+
+        console.log(`[✔] ${sortedEntries.length} ingressos validados encontrados.`);
+        res.status(200).json(sortedEntries);
+
+    } catch (error) {
+        console.error("[✘] Erro ao buscar ingressos validados:", error);
+        res.status(500).json({ error: "Erro no servidor ao buscar ingressos.", details: error.message });
+    }
+});
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Gasless rodando na porta ${PORT}`);
 
 });
+

@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
 import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
@@ -15,8 +15,6 @@ import path from 'path';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// --- CARREGAMENTO DO IDL (Interface Definition Language) ---
 const idl = JSON.parse(fs.readFileSync(path.resolve(__dirname, './ticketing_system.json'), 'utf8'));
 
 // --- VARIÁVEIS DE AMBIENTE E CONSTANTES ---
@@ -32,11 +30,7 @@ if (!SOLANA_RPC_URL || !PAYER_MNEMONIC) {
     throw new Error("As variáveis de ambiente SOLANA_RPC_URL e PAYER_MNEMONIC são obrigatórias.");
 }
 
-// ====================================================================
-// ✅ ATENÇÃO: COLOQUE AQUI O PROGRAM ID DO SEU ÚLTIMO DEPLOY BEM-SUCEDIDO!
-const PROGRAM_ID = new PublicKey("GRDPcYTxrXv1mX3ExUS2UUjjAWNezUdiwvRtn3EQP8Ci"); // Exemplo
-// ====================================================================
-
+const PROGRAM_ID = new PublicKey("AHRuW77r9tM8RAX7qbhVyjktgSZueb6QVjDjWXjEoCeA"); 
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 // --- CONFIGURAÇÃO DA CONEXÃO SOLANA ---
@@ -45,123 +39,259 @@ const getKeypairFromMnemonic = (mnemonic) => {
     const path = `m/44'/501'/0'/0'`;
     return Keypair.fromSeed(derivePath(path, seed.toString('hex')).key);
 };
-
 const payerKeypair = getKeypairFromMnemonic(PAYER_MNEMONIC);
 const payerWallet = new Wallet(payerKeypair);
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 const provider = new AnchorProvider(connection, payerWallet, AnchorProvider.defaultOptions());
 const program = new Program(idl, PROGRAM_ID, provider);
 
+console.log(`[+] API configurada com o programa: ${PROGRAM_ID.toString()}`);
+console.log(`[+] Carteira pagadora (Payer): ${payerKeypair.publicKey.toString()}`);
+
+
 // ====================================================================
-// --- NOVO ENDPOINT PARA CRIAR O CONTADOR DO COMPRADOR ---
+// --- Endpoint 1: ONBOARDING WEB2 (Com financiamento da nova carteira) ---
 // ====================================================================
-app.post('/create-buyer-counter', async (req, res) => {
-    const { eventAddress, buyerAddress } = req.body;
-    if (!eventAddress || !buyerAddress) {
-        return res.status(400).json({ error: "Parâmetros obrigatórios ausentes: eventAddress, buyerAddress." });
+app.post('/generate-wallet-and-mint', async (req, res) => {
+    const { eventAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
+    if (!eventAddress || tierIndex === undefined || !name || !phone) {
+        return res.status(400).json({ error: "Parâmetros de evento e cadastro são obrigatórios." });
     }
 
-    console.log(`[+] Pedido para criar/verificar contador para o evento ${eventAddress} para ${buyerAddress}`);
+    console.log(`[+] Iniciando onboarding completo para o usuário: ${name}`);
+    
+    try {
+        const newUserKeypair = Keypair.generate();
+        const newUserPublicKey = newUserKeypair.publicKey;
+        console.log(` -> Nova carteira gerada: ${newUserPublicKey.toString()}`);
+
+        console.log(" -> Financiando nova carteira para cobrir o 'rent'...");
+        const rentLamports = 5000000;
+        const transferTransaction = new Transaction().add(
+            SystemProgram.transfer({
+                fromPubkey: payerKeypair.publicKey,
+                toPubkey: newUserPublicKey,
+                lamports: rentLamports,
+            })
+        );
+        await sendAndConfirmTransaction(connection, transferTransaction, [payerKeypair]);
+        console.log(` -> Nova carteira financiada com ${rentLamports} lamports.`);
+
+        const [userProfilePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("user_profile"), newUserPublicKey.toBuffer()],
+            program.programId
+        );
+
+        console.log(" -> Registrando perfil do usuário...");
+        
+        const registerUserInstruction = await program.methods
+            .registerUser(name, phone, email || "", company || "", sector || "", role || "")
+            .accounts({
+                authority: newUserPublicKey,
+                userProfile: userProfilePda,
+                systemProgram: SystemProgram.programId,
+            })
+            .instruction();
+
+        const registerTransaction = new Transaction().add(registerUserInstruction);
+        
+        await sendAndConfirmTransaction(connection, registerTransaction, [
+            payerKeypair,
+            newUserKeypair,
+        ]);
+        
+        const eventPubkey = new PublicKey(eventAddress);
+        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()],
+            program.programId
+        );
+
+        console.log(" -> Criando contador de ingressos...");
+        await program.methods.createBuyerCounter()
+            .accounts({
+                payer: payerKeypair.publicKey,
+                event: eventPubkey,
+                buyer: newUserPublicKey,
+                buyerTicketCount: buyerTicketCountPda,
+                systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+
+        const mintKeypair = Keypair.generate();
+        const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+        const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
+        const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
+        const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
+        
+        console.log(" -> Mintando o ingresso...");
+        const signature = await program.methods
+            .mintFreeTicket(tierIndex)
+            .accounts({
+                globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey,
+                buyer: newUserPublicKey, mintAccount: mintKeypair.publicKey, ticket: ticketPda,
+                buyerTicketCount: buyerTicketCountPda, associatedTokenAccount: associatedTokenAccount,
+                metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
+            })
+            .signers([mintKeypair])
+            .rpc();
+
+        const mnemonic = bip39.entropyToMnemonic(newUserKeypair.secretKey.slice(0, 16));
+        console.log(`[✔] Onboarding completo! Assinatura do mint: ${signature}`);
+        res.status(200).json({
+            success: true,
+            publicKey: newUserPublicKey.toString(),
+            seedPhrase: mnemonic,
+            mintAddress: mintKeypair.publicKey.toString(),
+        });
+
+    } catch (error) {
+        console.error("[✘] Erro durante o onboarding completo:", error);
+        const errorDetails = error.logs ? error.logs.join(' ') : error.message;
+        res.status(500).json({ error: "Erro no servidor durante o onboarding.", details: errorDetails });
+    }
+});
+
+// ====================================================================
+// --- Endpoint 2: CADASTRO PARA USUÁRIOS WEB3 EXISTENTES (Gasless) ---
+// ====================================================================
+app.post('/register-user', async (req, res) => {
+    const { authority, name, phone, email, company, sector, role } = req.body;
+    if (!authority || !name || !phone) {
+        return res.status(400).json({ error: "Parâmetros authority, name e phone são obrigatórios." });
+    }
+    console.log(`[+] Registrando perfil para a carteira: ${authority}`);
+    try {
+        const authorityPubkey = new PublicKey(authority);
+        const [userProfilePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("user_profile"), authorityPubkey.toBuffer()],
+            program.programId
+        );
+        const signature = await program.methods
+            .registerUser(name, phone, email || "", company || "", sector || "", role || "")
+            .accounts({
+                authority: authorityPubkey,
+                userProfile: userProfilePda,
+                payer: payerKeypair.publicKey,
+                systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+        console.log(`[✔] Perfil registrado/atualizado com sucesso! Assinatura: ${signature}`);
+        res.status(200).json({ success: true, signature });
+    } catch (error) {
+        console.error("[✘] Erro ao registrar perfil:", error);
+        const errorDetails = error.logs ? error.logs.join(' ') : error.message;
+        res.status(500).json({ error: "Erro no servidor ao registrar perfil.", details: errorDetails });
+    }
+});
+
+// ====================================================================
+// --- Endpoint 3: RECUPERAÇÃO DE DADOS (Para Check-in e Certificado) ---
+// ====================================================================
+app.get('/ticket-data/:mintAddress', async (req, res) => {
+    const { mintAddress } = req.params;
+    if (!mintAddress) {
+        return res.status(400).json({ error: "O mintAddress do NFT é obrigatório." });
+    }
+    console.log(`[+] Buscando dados do dono do NFT: ${mintAddress}`);
+    try {
+        const nftMint = new PublicKey(mintAddress);
+        const tickets = await program.account.ticket.all([
+            { memcmp: { offset: 8 + 32, bytes: nftMint.toBase58() } }
+        ]);
+        if (tickets.length === 0) {
+            return res.status(404).json({ error: "Ingresso (NFT) não encontrado em nosso sistema." });
+        }
+        const ticketAccount = tickets[0];
+        const ownerPublicKey = ticketAccount.account.owner;
+        console.log(` -> Dono encontrado: ${ownerPublicKey.toString()}`);
+        const [userProfilePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("user_profile"), ownerPublicKey.toBuffer()],
+            program.programId
+        );
+        const userProfile = await program.account.userProfile.fetch(userProfilePda);
+        console.log(`[✔] Perfil encontrado para ${userProfile.name}`);
+        
+        // ✅ GARANTINDO QUE O OBJETO 'ticket' SEJA RETORNADO
+        res.status(200).json({
+            success: true,
+            owner: ownerPublicKey.toString(),
+            profile: userProfile,
+            ticket: ticketAccount.account,
+        });
+
+    } catch (error) {
+        console.error("[✘] Erro ao buscar dados do ingresso:", error);
+        if (error.message.includes("Account does not exist")) {
+             return res.status(404).json({ error: "Perfil de usuário não encontrado para o dono deste ingresso." });
+        }
+        const errorDetails = error.logs ? error.logs.join(' ') : error.message;
+        res.status(500).json({ error: "Erro no servidor ao buscar dados do ingresso.", details: errorDetails });
+    }
+});
+
+// ====================================================================
+// --- Endpoint 4: MINT PARA USUÁRIOS WEB3 EXISTENTES (Gasless) ---
+// ====================================================================
+app.post('/mint-for-existing-user', async (req, res) => {
+    const { eventAddress, buyerAddress, tierIndex } = req.body;
+    if (!eventAddress || !buyerAddress || tierIndex === undefined) {
+        return res.status(400).json({ error: "Parâmetros obrigatórios ausentes." });
+    }
+    console.log(`[+] Iniciando mint para usuário existente: ${buyerAddress}`);
     try {
         const eventPubkey = new PublicKey(eventAddress);
         const buyer = new PublicKey(buyerAddress);
-
         const [buyerTicketCountPda] = PublicKey.findProgramAddressSync(
             [Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyer.toBuffer()],
             program.programId
         );
-
-        // Otimização: Verifique se a conta já existe para não enviar uma transação desnecessária
         const accountInfo = await connection.getAccountInfo(buyerTicketCountPda);
-        if (accountInfo) {
-            console.log("[✔] Contador já existe.");
-            return res.status(200).json({ success: true, message: "Contador já existe." });
+        if (!accountInfo) {
+            console.log(" -> Contador não encontrado, criando...");
+            await program.methods.createBuyerCounter()
+                .accounts({
+                    payer: payerKeypair.publicKey, event: eventPubkey, buyer: buyer,
+                    buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId,
+                })
+                .rpc();
+            console.log(" -> Contador criado com sucesso.");
+        } else {
+            console.log(" -> Contador já existe.");
         }
-
-        console.log(" -> Contador não encontrado. Criando transação...");
-        const signature = await program.methods
-            .createBuyerCounter()
-            .accounts({
-                payer: payerKeypair.publicKey,
-                event: eventPubkey,
-                buyer: buyer,
-                buyerTicketCount: buyerTicketCountPda,
-                systemProgram: SystemProgram.programId,
-            })
-            // Apenas a carteira do servidor (payer) precisa assinar
-            .signers([payerKeypair])
-            .rpc();
-
-        console.log(`[✔] Contador criado com sucesso! Assinatura: ${signature}`);
-        res.status(200).json({ success: true, signature });
-
-    } catch (error) {
-        // Se o erro for que a conta já existe (caso de uma corrida de requests), trate como sucesso.
-        if (error.message && error.message.includes("already in use")) {
-             console.log("[✔] Contador já existe (detectado durante a transação).");
-             return res.status(200).json({ success: true, message: "Contador já existe." });
-        }
-        console.error("[✘] Erro ao criar o contador:", error);
-        res.status(500).json({ error: "Erro no servidor ao criar o contador." });
-    }
-});
-
-
-// ====================================================================
-// --- ENDPOINT ATUALIZADO PARA MINTAR O INGRESSO ---
-// ====================================================================
-app.post('/mint-free-ticket', async (req, res) => {
-    const { eventAddress, buyerAddress, tierIndex } = req.body;
-    if (!eventAddress || !buyerAddress || tierIndex === undefined) {
-        return res.status(400).json({ error: "Parâmetros obrigatórios ausentes: eventAddress, buyerAddress, tierIndex." });
-    }
-
-    console.log(`[+] Pedido para mintar ingresso do evento ${eventAddress} para ${buyerAddress}`);
-    try {
-        const eventPubkey = new PublicKey(eventAddress);
-        const buyer = new PublicKey(buyerAddress);
         const mintKeypair = Keypair.generate();
-
-        // Derivando todas as contas necessárias explicitamente para clareza
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
-        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyer.toBuffer()], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, buyer);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
-
-        console.log(" -> Construindo a transação de mint...");
+        console.log(" -> Mintando o ingresso...");
         const signature = await program.methods
             .mintFreeTicket(tierIndex)
             .accounts({
-                globalConfig: globalConfigPda,
-                event: eventPubkey,
-                payer: payerKeypair.publicKey,
-                buyer: buyer,
-                mintAccount: mintKeypair.publicKey,
-                ticket: ticketPda,
-                buyerTicketCount: buyerTicketCountPda, // Esta conta agora deve existir
-                associatedTokenAccount: associatedTokenAccount,
-                metadataAccount: metadataPda,
-                metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID,
-                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId,
-                rent: SYSVAR_RENT_PUBKEY,
+                globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey,
+                buyer: buyer, mintAccount: mintKeypair.publicKey, ticket: ticketPda,
+                buyerTicketCount: buyerTicketCountPda, associatedTokenAccount: associatedTokenAccount,
+                metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
             })
-            .signers([payerKeypair, mintKeypair])
+            .signers([mintKeypair])
             .rpc();
-
-        console.log(`[✔] Ingresso mintado com sucesso! Assinatura: ${signature}`);
-        res.status(200).json({ success: true, signature });
+        console.log(`[✔] Ingresso mintado para usuário existente! Assinatura: ${signature}`);
+        res.status(200).json({
+            success: true,
+            signature,
+            mintAddress: mintKeypair.publicKey.toString(),
+        });
     } catch (error) {
-        console.error("[✘] Erro ao processar o mint:", error);
+        console.error("[✘] Erro ao mintar para usuário existente:", error);
         const errorDetails = error.logs ? error.logs.join(' ') : error.message;
-        res.status(500).json({ error: "Erro no servidor ao processar a transação.", details: errorDetails });
+        res.status(500).json({ error: "Erro no servidor ao mintar para usuário existente.", details: errorDetails });
     }
 });
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor gasless rodando na porta ${PORT}`);
-    console.log(`🔑 Carteira pagadora (Payer): ${payerKeypair.publicKey.toString()}`);
+    console.log(`🚀 Servidor Gasless rodando na porta ${PORT}`);
 });

@@ -327,17 +327,16 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
     try {
         const eventPubkey = new PublicKey(eventAddress);
         
-        // Busca todas as contas 'Ticket' que pertencem a este evento e foram resgatadas
         const redeemedTickets = await program.account.ticket.all([
             { memcmp: { offset: 8, bytes: eventPubkey.toBase58() } }, // Filtra pelo evento
-            { memcmp: { offset: 8 + 32 + 32, bytes: bs58.encode([1]) } } // Filtra por redeemed = true
+            // ✅ CORREÇÃO AQUI: O offset para o campo 'redeemed' é 104 (8 + 32 + 32 + 32)
+            { memcmp: { offset: 104, bytes: bs58.encode([1]) } } // Filtra por redeemed = true
         ]);
 
         if (redeemedTickets.length === 0) {
-            return res.status(200).json([]); // Retorna array vazio se nenhum foi validado ainda
+            return res.status(200).json([]);
         }
 
-        // Para enriquecer os dados, buscamos o perfil de cada dono
         const validatedEntries = await Promise.all(redeemedTickets.map(async (ticket) => {
             try {
                 const [userProfilePda] = PublicKey.findProgramAddressSync(
@@ -351,7 +350,6 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
                     nftMint: ticket.account.nftMint.toString(),
                 };
             } catch (e) {
-                // Se o perfil não for encontrado, retorna com dados limitados
                 return {
                     name: "Perfil não encontrado",
                     redeemedAt: new Date(ticket.account.redeemedAt * 1000).toLocaleTimeString('pt-BR'),
@@ -360,7 +358,6 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
             }
         }));
         
-        // Ordena pelos mais recentes primeiro
         const sortedEntries = validatedEntries.sort((a, b) => new Date(b.redeemedAt) - new Date(a.redeemedAt));
 
         console.log(`[✔] ${sortedEntries.length} ingressos validados encontrados.`);
@@ -377,5 +374,6 @@ app.listen(PORT, () => {
     console.log(`🚀 Servidor Gasless rodando na porta ${PORT}`);
 
 });
+
 
 

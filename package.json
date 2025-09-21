@@ -1,27 +1,19 @@
 {
-  "name": "gasless-api-node",
-  "version": "1.0.0",
-  "description": "API Gasless para minting de NFTs na Solana",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "build": "npm install"
-  },
-  "dependencies": {
-    "@solana/web3.js": "^1.87.6",
-    "@coral-xyz/anchor": "^0.29.0",
-    "@solana/spl-token": "^0.4.9",
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "bs58": "^5.0.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
-  "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=8.0.0"
+    "name": "gasless-api",
+    "version": "1.0.0",
+    "description": "API para pagar pelas transações de mint de ingressos gratuitos.",
+    "main": "server.js",
+    "type": "module",
+    "scripts": {
+      "start": "node server.js"
+    },
+    "dependencies": {
+      "@coral-xyz/anchor": "^0.29.0",
+      "@solana/spl-token": "^0.4.3",
+      "bip39": "^3.1.0",
+      "cors": "^2.8.5",
+      "dotenv": "^16.4.5",
+      "ed25519-hd-key": "^1.3.0",
+      "express": "^4.19.2"
+    }
   }
-}

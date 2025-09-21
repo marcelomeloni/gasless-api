@@ -194,40 +194,63 @@ app.get('/ticket-data/:mintAddress', async (req, res) => {
     if (!mintAddress) {
         return res.status(400).json({ error: "O mintAddress do NFT é obrigatório." });
     }
-    console.log(`[+] Buscando dados do dono do NFT: ${mintAddress}`);
+
+    console.log(`[+] Buscando dados completos do ingresso: ${mintAddress}`);
     try {
         const nftMint = new PublicKey(mintAddress);
+        
+        // 1. Encontrar a conta 'Ticket'
         const tickets = await program.account.ticket.all([
             { memcmp: { offset: 8 + 32, bytes: nftMint.toBase58() } }
         ]);
+        
         if (tickets.length === 0) {
-            return res.status(404).json({ error: "Ingresso (NFT) não encontrado em nosso sistema." });
+            return res.status(404).json({ error: "Ingresso (NFT) não encontrado." });
         }
+        
         const ticketAccount = tickets[0];
         const ownerPublicKey = ticketAccount.account.owner;
+        const eventPublicKey = ticketAccount.account.event;
         console.log(` -> Dono encontrado: ${ownerPublicKey.toString()}`);
+        console.log(` -> Evento encontrado: ${eventPublicKey.toString()}`);
+
+        // 2. Buscar a conta 'UserProfile' do dono
         const [userProfilePda] = PublicKey.findProgramAddressSync(
             [Buffer.from("user_profile"), ownerPublicKey.toBuffer()],
             program.programId
         );
         const userProfile = await program.account.userProfile.fetch(userProfilePda);
-        console.log(`[✔] Perfil encontrado para ${userProfile.name}`);
-        
-        // ✅ GARANTINDO QUE O OBJETO 'ticket' SEJA RETORNADO
+        console.log(` -> Perfil encontrado para ${userProfile.name}`);
+
+        // ✅ PASSO ADICIONAL: Buscar os metadados do evento
+        console.log(" -> Buscando metadados do evento...");
+        const eventAccount = await program.account.event.fetch(eventPublicKey);
+        const metadataResponse = await fetch(eventAccount.metadataUri);
+        if (!metadataResponse.ok) {
+            throw new Error("Falha ao buscar metadados do evento.");
+        }
+        const eventMetadata = await metadataResponse.json();
+        console.log(` -> Nome do evento: ${eventMetadata.name}`);
+
+        // 3. Retornar tudo
         res.status(200).json({
             success: true,
             owner: ownerPublicKey.toString(),
             profile: userProfile,
             ticket: ticketAccount.account,
+            event: { // ✅ Inclui um novo objeto 'event' na resposta
+                name: eventMetadata.name,
+                metadata: eventMetadata, // Envia todos os metadados, se precisar de mais algo
+            }
         });
 
     } catch (error) {
         console.error("[✘] Erro ao buscar dados do ingresso:", error);
         if (error.message.includes("Account does not exist")) {
-             return res.status(404).json({ error: "Perfil de usuário não encontrado para o dono deste ingresso." });
+             return res.status(404).json({ error: "Perfil de usuário não encontrado para este ingresso." });
         }
         const errorDetails = error.logs ? error.logs.join(' ') : error.message;
-        res.status(500).json({ error: "Erro no servidor ao buscar dados do ingresso.", details: errorDetails });
+        res.status(500).json({ error: "Erro no servidor ao buscar dados.", details: errorDetails });
     }
 });
 
@@ -294,4 +317,5 @@ app.post('/mint-for-existing-user', async (req, res) => {
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Gasless rodando na porta ${PORT}`);
+
 });

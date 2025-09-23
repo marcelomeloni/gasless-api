@@ -59,11 +59,25 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         return res.status(400).json({ error: "Event and registration parameters are required." });
     }
     console.log(`[+] Starting full onboarding for user: ${name}`);
+    
     try {
-        const newUserKeypair = Keypair.generate();
+        // --- 1. Geração de Carteira Compatível ---
+        const mnemonic = bip39.generateMnemonic();
+        const newUserKeypair = getKeypairFromMnemonic(mnemonic); // Usa o caminho de derivação padrão
         const newUserPublicKey = newUserKeypair.publicKey;
-        console.log(` -> New wallet generated: ${newUserPublicKey.toString()}`);
-        
+        console.log(` -> New wallet generated with standard derivation path: ${newUserPublicKey.toString()}`);
+
+        // --- 2. Verificar o Preço do Ingresso ---
+        const eventPubkey = new PublicKey(eventAddress);
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const selectedTier = eventAccount.tiers[tierIndex];
+
+        if (!selectedTier) {
+            return res.status(400).json({ error: "Invalid tier index." });
+        }
+        const isFree = selectedTier.priceLamports.toNumber() === 0;
+
+        // --- 3. Criação de Perfil e Contador ---
         console.log(" -> Generating hash and creating on-chain profile...");
         const userDataString = [name.trim(), phone.trim(), (email || "").trim(), (company || "").trim(), (sector || "").trim(), (role || "").trim()].join('|');
         const dataHash = createHash('sha256').update(userDataString).digest();
@@ -72,44 +86,85 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         await program.methods.registerUser(Array.from(dataHash)).accounts({
             authority: newUserPublicKey,
             userProfile: userProfilePda,
-            payer: payerKeypair.publicKey,
+            payer: payerKeypair.publicKey, // Servidor paga pela criação
             systemProgram: SystemProgram.programId,
         }).rpc();
+        console.log(" -> Profile created.");
 
-        console.log(" -> Profile created. Proceeding with mint...");
-        const eventPubkey = new PublicKey(eventAddress);
         const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
-        await program.methods.createBuyerCounter().accounts({ payer: payerKeypair.publicKey, event: eventPubkey, buyer: newUserPublicKey, buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId }).rpc();
-        
+        await program.methods.createBuyerCounter().accounts({ 
+            payer: payerKeypair.publicKey, // Servidor paga pela criação
+            event: eventPubkey, 
+            buyer: newUserPublicKey, 
+            buyerTicketCount: buyerTicketCountPda, 
+            systemProgram: SystemProgram.programId 
+        }).rpc();
+        console.log(" -> Buyer counter created.");
+
+        // --- 4. Lógica de Mint (Grátis vs. Pago) ---
         const mintKeypair = Keypair.generate();
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
-        // Esta instrução PRECISA de signers extras (o mintKeypair), então aqui está correto.
-        const signature = await program.methods.mintFreeTicket(tierIndex).accounts({ 
-            globalConfig: globalConfigPda, 
-            event: eventPubkey, 
-            payer: payerKeypair.publicKey, 
-            buyer: newUserPublicKey, 
-            mintAccount: mintKeypair.publicKey, 
-            ticket: ticketPda, 
-            buyerTicketCount: buyerTicketCountPda, 
-            associatedTokenAccount: associatedTokenAccount, 
-            metadataAccount: metadataPda, 
-            metadataProgram: TOKEN_METADATA_PROGRAM_ID, 
-            tokenProgram: TOKEN_PROGRAM_ID, 
-            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, 
-            systemProgram: SystemProgram.programId, 
-            rent: SYSVAR_RENT_PUBKEY 
-        }).signers([payerKeypair, mintKeypair]).rpc();
+        let signature;
 
-        const mnemonic = bip39.entropyToMnemonic(newUserKeypair.secretKey.slice(0, 16));
-        res.status(200).json({ success: true, publicKey: newUserPublicKey.toString(), seedPhrase: mnemonic, mintAddress: mintKeypair.publicKey.toString() });
+        if (isFree) {
+            console.log(" -> Tier is free. Minting ticket...");
+            signature = await program.methods.mintFreeTicket(tierIndex).accounts({
+                globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
+                mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+                associatedTokenAccount: associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
+                rent: SYSVAR_RENT_PUBKEY,
+            }).signers([payerKeypair, mintKeypair]).rpc();
+
+        } else {
+            console.log(" -> Tier is paid. Funding new wallet and minting ticket...");
+            const [refundReservePda] = PublicKey.findProgramAddressSync([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], program.programId);
+
+            // Custo total: preço do ingresso + uma pequena margem para taxas de transação
+            const lamportsToFund = selectedTier.priceLamports.toNumber() + 2000000; // 0.002 SOL de margem
+
+            // Instrução para financiar a nova carteira
+            const fundInstruction = SystemProgram.transfer({
+                fromPubkey: payerKeypair.publicKey,
+                toPubkey: newUserPublicKey,
+                lamports: lamportsToFund,
+            });
+
+            // Instrução para comprar o ingresso (a nova carteira agora tem fundos para pagar)
+            const mintInstruction = await program.methods.mintTicket(tierIndex)
+                .accounts({
+                    globalConfig: globalConfigPda, event: eventPubkey, refundReserve: refundReservePda,
+                    buyer: newUserPublicKey, buyerTicketCount: buyerTicketCountPda, mintAccount: mintKeypair.publicKey,
+                    metadataAccount: metadataPda, associatedTokenAccount: associatedTokenAccount, tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                    tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                    systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY, ticket: ticketPda,
+                }).instruction();
+
+            // Juntando tudo em uma única transação
+            const transaction = new Transaction().add(fundInstruction, mintInstruction);
+            
+            // O servidor (payer) paga as taxas, e assina a transação junto com a nova carteira e o mint
+            signature = await program.provider.sendAndConfirm(transaction, [payerKeypair, newUserKeypair, mintKeypair]);
+        }
+
+        console.log(`[✔] Onboarding and mint successful! Signature: ${signature}`);
+        res.status(200).json({ 
+            success: true, 
+            publicKey: newUserPublicKey.toString(), 
+            seedPhrase: mnemonic, // A frase secreta compatível
+            mintAddress: mintKeypair.publicKey.toString(),
+            signature: signature
+        });
+
     } catch (error) {
         console.error("[✘] Error during full onboarding:", error);
-        res.status(500).json({ error: "Server error during onboarding.", details: error.message });
+        const anchorError = anchor.AnchorError.parse(error.logs);
+        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
+        res.status(500).json({ error: "Server error during onboarding.", details: errorMessage || "Unknown error" });
     }
 });
 
@@ -353,3 +408,4 @@ app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 
 });
+

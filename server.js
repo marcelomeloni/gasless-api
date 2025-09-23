@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, Transaction } from '@solana/web3.js';
 import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
@@ -69,15 +69,12 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         const dataHash = createHash('sha256').update(userDataString).digest();
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
         
-        // ✅ CORREÇÃO DEFINITIVA: Removido o `.signers()`
-        // A instrução só precisa da assinatura do 'payer', que já é o padrão do provider.
-        // O contrato NÃO espera a assinatura da 'authority' (newUserKeypair).
         await program.methods.registerUser(Array.from(dataHash)).accounts({
             authority: newUserPublicKey,
             userProfile: userProfilePda,
             payer: payerKeypair.publicKey,
             systemProgram: SystemProgram.programId,
-        }).rpc(); // <-- .signers() removido daqui
+        }).rpc();
 
         console.log(" -> Profile created. Proceeding with mint...");
         const eventPubkey = new PublicKey(eventAddress);
@@ -116,7 +113,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
     }
 });
 
-// ... (o restante do arquivo permanece o mesmo) ...
+
 
 // ====================================================================
 // --- Endpoint 2: MINT FOR EXISTING WEB3 USERS ---
@@ -127,9 +124,12 @@ app.post('/mint-for-existing-user', async (req, res) => {
         return res.status(400).json({ error: "'eventAddress', 'buyerAddress', and 'tierIndex' parameters are required." });
     }
     console.log(`[+] Initiating mint for existing user: ${buyerAddress}`);
+    
     try {
         const eventPubkey = new PublicKey(eventAddress);
         const buyer = new PublicKey(buyerAddress);
+
+        // --- 1. Verificação e Criação de Perfil/Contador (se necessário) ---
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), buyer.toBuffer()], program.programId);
         const userProfileAccount = await connection.getAccountInfo(userProfilePda);
         
@@ -144,7 +144,7 @@ app.post('/mint-for-existing-user', async (req, res) => {
             await program.methods.registerUser(Array.from(dataHash)).accounts({
                 authority: buyer,
                 userProfile: userProfilePda,
-                payer: payerKeypair.publicKey,
+                payer: payerKeypair.publicKey, // O servidor paga por esta criação
                 systemProgram: SystemProgram.programId,
             }).rpc();
             console.log(" -> On-chain profile created successfully.");
@@ -156,29 +156,115 @@ app.post('/mint-for-existing-user', async (req, res) => {
         const accountInfo = await connection.getAccountInfo(buyerTicketCountPda);
         if (!accountInfo) {
             console.log(" -> Ticket counter not found, creating...");
-            await program.methods.createBuyerCounter().accounts({ payer: payerKeypair.publicKey, event: eventPubkey, buyer: buyer, buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId }).rpc();
+            await program.methods.createBuyerCounter().accounts({ 
+                payer: payerKeypair.publicKey, // O servidor paga por esta criação
+                event: eventPubkey, 
+                buyer: buyer, 
+                buyerTicketCount: buyerTicketCountPda, 
+                systemProgram: SystemProgram.programId 
+            }).rpc();
         }
-        
+
+        // --- 2. Verificar o Preço do Ingresso ---
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const selectedTier = eventAccount.tiers[tierIndex];
+
+        if (!selectedTier) {
+            return res.status(400).json({ error: "Invalid tier index." });
+        }
+
+        const isFree = selectedTier.priceLamports.toNumber() === 0;
+
+        // --- 3. Lógica de Mint (Grátis vs. Pago) ---
         const mintKeypair = Keypair.generate();
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, buyer);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
-        
-        console.log(" -> Minting the ticket...");
-        const signature = await program.methods.mintFreeTicket(tierIndex).accounts({
-            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: buyer,
-            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
-            associatedTokenAccount: associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
-            rent: SYSVAR_RENT_PUBKEY,
-        }).signers([payerKeypair, mintKeypair]).rpc();
-        
-        console.log(`[✔] Ticket minted successfully! Signature: ${signature}`);
-        res.status(200).json({ success: true, signature, mintAddress: mintKeypair.publicKey.toString() });
+
+
+        if (isFree) {
+            // --- CASO 1: INGRESSO GRÁTIS ---
+            // O servidor paga por tudo e envia a transação.
+            console.log(" -> Tier is free. Minting with server-side logic...");
+            
+            const signature = await program.methods.mintFreeTicket(tierIndex).accounts({
+                globalConfig: globalConfigPda, 
+                event: eventPubkey, 
+                payer: payerKeypair.publicKey, // Servidor paga as taxas
+                buyer: buyer,
+                mintAccount: mintKeypair.publicKey, 
+                ticket: ticketPda, 
+                buyerTicketCount: buyerTicketCountPda,
+                associatedTokenAccount: associatedTokenAccount, 
+                metadataAccount: metadataPda, 
+                metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID, 
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, 
+                systemProgram: SystemProgram.programId,
+                rent: SYSVAR_RENT_PUBKEY,
+            }).signers([payerKeypair, mintKeypair]).rpc();
+            
+            console.log(`[✔] Free ticket minted successfully! Signature: ${signature}`);
+            res.status(200).json({ success: true, isPaid: false, signature, mintAddress: mintKeypair.publicKey.toString() });
+
+        } else {
+            // --- CASO 2: INGRESSO PAGO ---
+            // O servidor prepara a transação e o frontend a envia para o usuário assinar.
+            console.log(" -> Tier is paid. Creating transaction for client-side signing...");
+            
+            const [refundReservePda] = PublicKey.findProgramAddressSync([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], program.programId);
+
+            // Cria a instrução de mint pago
+            const mintInstruction = await program.methods
+                .mintTicket(tierIndex)
+                .accounts({
+                    globalConfig: globalConfigPda,
+                    event: eventPubkey,
+                    refundReserve: refundReservePda,
+                    buyer: buyer, // O usuário vai pagar e assinar
+                    buyerTicketCount: buyerTicketCountPda,
+                    mintAccount: mintKeypair.publicKey,
+                    metadataAccount: metadataPda,
+                    associatedTokenAccount: associatedTokenAccount,
+                    tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                    systemProgram: SystemProgram.programId,
+                    rent: SYSVAR_RENT_PUBKEY,
+                    ticket: ticketPda,
+                })
+                .instruction();
+
+            // Cria uma nova transação
+            const transaction = new Transaction().add(mintInstruction);
+
+            // Define o comprador como o pagador das taxas da transação
+            transaction.feePayer = buyer;
+            transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+            // O servidor precisa pré-assinar com a keypair do mint (pois ele a criou)
+            transaction.partialSign(mintKeypair);
+
+            // Serializa a transação para enviar ao frontend
+            const serializedTransaction = transaction.serialize({
+                requireAllSignatures: false, // O comprador ainda precisa assinar
+            });
+
+            console.log("[✔] Paid transaction created and serialized. Sending to client.");
+            res.status(200).json({
+                success: true,
+                isPaid: true,
+                transaction: serializedTransaction.toString('base64'),
+                mintAddress: mintKeypair.publicKey.toString(),
+            });
+        }
     } catch (error) {
         console.error("[✘] Error minting for existing user:", error);
-        res.status(500).json({ error: "Server error while minting for existing user.", details: error.message });
+        // Tenta extrair a mensagem de erro do programa para dar um feedback melhor
+        const anchorError = anchor.AnchorError.parse(error.logs);
+        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
+        res.status(500).json({ error: "Server error while minting for existing user.", details: errorMessage || "Unknown error" });
     }
 });
 
@@ -265,4 +351,5 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
+
 });

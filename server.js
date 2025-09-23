@@ -301,14 +301,21 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 
     try {
         const eventPubkey = new PublicKey(eventAddress);
+        // Pega todos os ingressos validados da blockchain
         const allTicketsForEvent = await program.account.ticket.all([{ memcmp: { offset: 8, bytes: eventPubkey.toBase58() } }]);
         const redeemedTickets = allTicketsForEvent.filter(ticket => ticket.account.redeemed);
 
         if (redeemedTickets.length === 0) return res.status(200).json([]);
 
+        // 1. Pega os endereços de todos os donos dos ingressos
         const ownerAddresses = redeemedTickets.map(ticket => ticket.account.owner.toString());
+        
+        // 2. Busca no Supabase os nomes correspondentes a esses endereços
         const { data: profiles } = await supabase.from('profiles').select('wallet_address, name').in('wallet_address', ownerAddresses);
+        
+        // 3. Cria um "mapa" para facilitar a busca (carteira -> nome)
         const profilesMap = new Map(profiles.map(p => [p.wallet_address, p.name]));
+
 
         const validatedEntries = redeemedTickets.map(ticket => {
             const ownerAddress = ticket.account.owner.toString();
@@ -332,3 +339,4 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+

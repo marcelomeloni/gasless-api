@@ -249,7 +249,7 @@ app.post('/mint-for-existing-user', async (req, res) => {
 
 
 // ====================================================================
-// --- Endpoint 3: DATA RETRIEVAL (Enriched) ---
+// --- Endpoint 3: DATA RETRIEVAL ---
 // ====================================================================
 app.get('/ticket-data/:mintAddress', async (req, res) => {
     const { mintAddress } = req.params;
@@ -293,7 +293,7 @@ app.get('/ticket-data/:mintAddress', async (req, res) => {
 });
 
 // ====================================================================
-// --- Endpoint 4: FETCH VALIDATED TICKETS (Enriched) ---
+// --- Endpoint 4: FETCH VALIDATED TICKETS ---
 // ====================================================================
 app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
     const { eventAddress } = req.params;
@@ -339,5 +339,6 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 

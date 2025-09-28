@@ -15,7 +15,7 @@ export function TicketEmail({ userName, eventName, eventDate, eventLocation }) {
       <Body style={main}>
         <Container style={container}>
           <Img
-            src="https://sua-cdn.com/logo.png" // ✨ SUBSTITUA PELO LINK DO SEU LOGO
+            src="https://red-obedient-stingray-854.mypinata.cloud/ipfs/bafkreigpqj7473y2mly3dn6rjnnm3ww4cngbz6kjkgeagt7ifxe2d2g53u"
             width="120"
             alt="Ticketfy Logo"
             style={logo}

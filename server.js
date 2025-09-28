@@ -392,8 +392,8 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 app.get('/events/active', async (req, res) => {
     console.log('[+] Fetching active events...');
     try {
-        // O offset correto e final, calculado com base na sua struct final.
-        const STATE_FIELD_OFFSET = 579; 
+        // ⭐ OFFSET CORRIGIDO: 580 (com a nova estrutura TicketTier)
+        const STATE_FIELD_OFFSET = 580;
 
         const activeStateFilter = {
             memcmp: {
@@ -402,11 +402,10 @@ app.get('/events/active', async (req, res) => {
             }
         };
 
-        // Com o novo programId limpo, podemos voltar a usar .all() com segurança.
         const onChainEvents = await program.account.event.all([activeStateFilter]);
         console.log(` -> Found ${onChainEvents.length} events on-chain with 'Active' state.`);
 
-        // Filtro adicional no servidor para garantir que as datas de venda estão ativas.
+        // Resto do código permanece igual...
         const nowInSeconds = Math.floor(Date.now() / 1000);
         const fullyActiveEvents = onChainEvents.filter(event => {
             const acc = event.account;
@@ -416,7 +415,6 @@ app.get('/events/active', async (req, res) => {
         });
         console.log(` -> Found ${fullyActiveEvents.length} events that are fully active (dates/not canceled).`);
 
-        // Busca de metadados para cada evento ativo.
         const eventsWithMetadata = await Promise.all(
             fullyActiveEvents.map(async (event) => {
                 try {
@@ -438,7 +436,6 @@ app.get('/events/active', async (req, res) => {
             })
         );
         
-        // Limpeza e ordenação final dos eventos.
         const validEvents = eventsWithMetadata
             .filter(e => e !== null)
             .sort((a, b) => a.account.salesStartDate.toNumber() - b.account.salesStartDate.toNumber());
@@ -447,7 +444,6 @@ app.get('/events/active', async (req, res) => {
         res.status(200).json(validEvents);
 
     } catch (error) {
-        // Com a base de dados limpa, este erro não deve mais ser um RangeError.
         console.error("[✘] Error fetching active events:", error);
         res.status(500).json({ error: "Server error fetching events.", details: error.message });
     }
@@ -458,6 +454,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

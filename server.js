@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { createHash } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
-import { sendTicketEmail } from './services/emailService.js';
+import { sendTicketEmail } from './services/emailService.jsx';
 // --- INITIAL SETUP ---
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -457,6 +457,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

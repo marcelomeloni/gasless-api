@@ -34,7 +34,7 @@ if (!SOLANA_RPC_URL || !PAYER_MNEMONIC || !SUPABASE_URL || !SUPABASE_SERVICE_KEY
     throw new Error("Required environment variables are missing (Solana or Supabase).");
 }
 
-const PROGRAM_ID = new PublicKey("6BpG2uYeLSgHEynoT7VrNb6BpHSiwXPyayvECgCaizL5");
+const PROGRAM_ID = new PublicKey("2jq7fqT3gxn7Xg2SrxNobqUNxPQeWC5B5griJUpEFwvG");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 // --- SUPABASE CLIENT SETUP ---

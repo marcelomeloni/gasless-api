@@ -334,11 +334,75 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
     }
 });
 
+app.get('/events/active', async (req, res) => {
+    console.log('[+] Fetching active events...');
+    try {
+        // 1. FILTRAGEM ON-CHAIN: Peça à blockchain apenas os eventos com `state = 1` (Active).
+        // Este é o passo mais importante para a performance.
+        // O offset 48 assume que você fez a otimização na struct Rust.
+        // Se não fez, você precisará calcular o offset exato da sua struct atual.
+        const activeStateFilter = {
+            memcmp: {
+                offset: 48, // 8 (disc) + 8 (id) + 32 (controller) = 48
+                bytes: bs58.encode([1]), // 1 para EventState::Active
+            }
+        };
+
+        const onChainEvents = await program.account.event.all([activeStateFilter]);
+        console.log(` -> Found ${onChainEvents.length} events on-chain with 'Active' state.`);
+
+        // 2. FILTRAGEM SERVER-SIDE: Aplique as regras de negócio restantes (datas e cancelamento).
+        const nowInSeconds = Math.floor(Date.now() / 1000);
+        const fullyActiveEvents = onChainEvents.filter(event => {
+            const acc = event.account;
+            return !acc.canceled && 
+                   nowInSeconds >= acc.salesStartDate.toNumber() && 
+                   nowInSeconds <= acc.salesEndDate.toNumber();
+        });
+        console.log(` -> Found ${fullyActiveEvents.length} events that are fully active (dates/not canceled).`);
+
+        // 3. BUSCA DE METADADOS: Busque os metadados de cada evento ativo em paralelo.
+        const eventsWithMetadata = await Promise.all(
+            fullyActiveEvents.map(async (event) => {
+                try {
+                    const response = await fetch(event.account.metadataUri);
+                    if (!response.ok) {
+                        console.warn(` -> Failed to fetch metadata for event ${event.publicKey.toString()}`);
+                        return null; // Se a busca falhar, marcamos como nulo
+                    }
+                    const metadata = await response.json();
+                    return {
+                        publicKey: event.publicKey.toString(),
+                        account: event.account,
+                        metadata: metadata,
+                    };
+                } catch (e) {
+                    console.error(` -> Error fetching metadata for ${event.account.metadataUri}`, e);
+                    return null;
+                }
+            })
+        );
+        
+        // 4. LIMPEZA E ORDENAÇÃO: Remova os que falharam e ordene por data de início das vendas.
+        const validEvents = eventsWithMetadata
+            .filter(e => e !== null) // Remove eventos cujo metadata falhou
+            .sort((a, b) => a.account.salesStartDate.toNumber() - b.account.salesStartDate.toNumber());
+
+        console.log(`[✔] Successfully fetched and processed ${validEvents.length} active events.`);
+        res.status(200).json(validEvents);
+
+    } catch (error) {
+        console.error("[✘] Error fetching active events:", error);
+        res.status(500).json({ error: "Server error fetching events.", details: error.message });
+    }
+});
+
 
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

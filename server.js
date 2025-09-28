@@ -398,7 +398,7 @@ app.get('/events/active', async (req, res) => {
         // Se não fez, você precisará calcular o offset exato da sua struct atual.
         const activeStateFilter = {
             memcmp: {
-                offset: 48, // 8 (disc) + 8 (id) + 32 (controller) = 48
+                offset: 49, // 8 (disc) + 8 (id) + 32 (controller) = 48
                 bytes: bs58.encode([1]), // 1 para EventState::Active
             }
         };
@@ -457,6 +457,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

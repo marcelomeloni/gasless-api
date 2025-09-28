@@ -6,7 +6,7 @@ import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bip39 from 'bip39';
-import bs58 from 'bs58';
+
 import { derivePath } from 'ed25519-hd-key';
 import fs from 'fs';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes/index.js';
@@ -406,6 +406,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

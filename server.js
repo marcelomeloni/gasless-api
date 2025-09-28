@@ -8,6 +8,7 @@ import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_I
 import bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import fs from 'fs';
+import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes/index.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -402,6 +403,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

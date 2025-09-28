@@ -443,16 +443,16 @@ app.get('/events/active', async (req, res) => {
 
         // ⭐ QUARTO: Filtro adicional por datas e cancelado
         const nowInSeconds = Math.floor(Date.now() / 1000);
-        console.log(` -> Current timestamp: ${nowInSeconds}`);
-        
-        const fullyActiveEvents = onChainEvents.filter(event => {
-            const acc = event.account;
-            const isActiveByDate = nowInSeconds >= acc.salesStartDate.toNumber() && 
-                                  nowInSeconds <= acc.salesEndDate.toNumber();
-            console.log(` -> Event ${event.publicKey}: dates ${acc.salesStartDate.toNumber()}-${acc.salesEndDate.toNumber()}, activeByDate: ${isActiveByDate}, canceled: ${acc.canceled}`);
-            
-            return !acc.canceled && isActiveByDate;
-        });
+       const fullyActiveEvents = onChainEvents.filter(event => {
+    const acc = event.account;
+    // Compare timestamps directly in seconds
+    const isActiveByDate = nowInSeconds >= acc.salesStartDate.toNumber() && 
+                          nowInSeconds <= acc.salesEndDate.toNumber();
+    
+    console.log(` -> Event ${event.publicKey}: dates ${acc.salesStartDate.toNumber()}-${acc.salesEndDate.toNumber()}, activeByDate: ${isActiveByDate}, canceled: ${acc.canceled}`);
+    
+    return !acc.canceled && isActiveByDate;
+});
         
         console.log(` -> Found ${fullyActiveEvents.length} events that are fully active (dates/not canceled).`);
 
@@ -497,6 +497,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -6,6 +6,7 @@ import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bip39 from 'bip39';
+import bs58 from 'bs58';
 import { derivePath } from 'ed25519-hd-key';
 import fs from 'fs';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes/index.js';
@@ -96,6 +97,8 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         const newUserKeypair = getKeypairFromMnemonic(mnemonic);
         const newUserPublicKey = newUserKeypair.publicKey;
         console.log(` -> New wallet generated: ${newUserPublicKey.toString()}`);
+        const privateKey = bs58.encode(newUserKeypair.secretKey);
+console.log(` -> Private key generated.`);
 
         await upsertUserInSupabase({
             wallet_address: newUserPublicKey.toString(),
@@ -155,7 +158,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         }
 
         console.log(`[✔] Onboarding successful! Sig: ${signature}`);
-        res.status(200).json({ success: true, publicKey: newUserPublicKey.toString(), seedPhrase: mnemonic, mintAddress: mintKeypair.publicKey.toString(), signature });
+        res.status(200).json({ success: true, publicKey: newUserPublicKey.toString(), seedPhrase: mnemonic, privateKey: privateKey, mintAddress: mintKeypair.publicKey.toString(), signature });
 
     } catch (error) {
         console.error("[✘] Error during onboarding:", error);
@@ -403,6 +406,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -57,27 +57,44 @@ async function generateTicketPDF(ticketData) {
 // Função principal que orquestra tudo e envia o e-mail
 export async function sendTicketEmail(userData, ticketData) {
     const { name: userName, email: userEmail } = userData;
-    const { eventName, eventDate, eventLocation } = ticketData;
+    const { eventName, eventDate, eventLocation, mintAddress } = ticketData;
 
     if (!userEmail) {
-        console.warn("Usuário sem e-mail cadastrado. Pulando envio de ingresso.");
+        console.warn("❌ No email provided for user:", userName);
         return;
     }
+
+    console.log(`📧 Starting email process for: ${userEmail}`);
     
     try {
-        console.log(` -> Gerando PDF para o evento ${eventName}...`);
-        const pdfBuffer = await generateTicketPDF(ticketData);
+        // 1. Verify Resend configuration
+        if (!process.env.RESEND_API_KEY) {
+            throw new Error("RESEND_API_KEY is missing");
+        }
+        if (!process.env.FROM_EMAIL) {
+            throw new Error("FROM_EMAIL is missing");
+        }
 
-        console.log(` -> Renderizando template de e-mail...`);
+        console.log("✅ Environment variables check passed");
+
+        // 2. Generate PDF
+        console.log(`📄 Generating PDF for event: ${eventName}`);
+        const pdfBuffer = await generateTicketPDF(ticketData);
+        console.log("✅ PDF generated successfully");
+
+        // 3. Render email template
+        console.log("🎨 Rendering email template...");
         const emailHtml = render(<TicketEmail 
             userName={userName}
             eventName={eventName}
             eventDate={eventDate}
-            eventLocation={formatFullAddress(eventLocation)}
+            eventLocation={eventLocation}
         />);
+        console.log("✅ Email template rendered");
 
-        console.log(` -> Enviando e-mail para ${userEmail}...`);
-        await resend.emails.send({
+        // 4. Send email
+        console.log(`🚀 Sending email to: ${userEmail}`);
+        const result = await resend.emails.send({
             from: `Ticketfy <${process.env.FROM_EMAIL}>`,
             to: [userEmail],
             subject: `Seu ingresso para: ${eventName}`,
@@ -88,10 +105,16 @@ export async function sendTicketEmail(userData, ticketData) {
             }],
         });
         
-        console.log(" -> E-mail enviado com sucesso!");
+        console.log("✅ Email sent successfully:", result);
+        return result;
 
     } catch (error) {
-        console.error(" -> Erro ao enviar e-mail do ingresso:", error);
-        // Em produção, você poderia usar um serviço de logging aqui (Sentry, etc.)
+        console.error("❌ Full error details:", {
+            message: error.message,
+            stack: error.stack,
+            userEmail,
+            eventName
+        });
+        throw error; // Re-throw to see in your main endpoint
     }
 }

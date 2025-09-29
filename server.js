@@ -392,71 +392,37 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 app.get('/events/active', async (req, res) => {
     console.log('[+] Fetching active events...');
     try {
-        // ⭐ PRIMEIRO: Buscar TODOS os eventos sem filtro para debug
+        // ⭐ BUSCAR TODOS OS EVENTOS E FILTRAR NO JAVASCRIPT
         const allEvents = await program.account.event.all();
         console.log(` -> Found ${allEvents.length} total events on-chain`);
         
-        // Debug detalhado de cada evento
-        allEvents.forEach((event, index) => {
-            console.log(`\n--- Event ${index} ---`);
-            console.log(`Public Key: ${event.publicKey.toString()}`);
-            console.log(`State: ${event.account.state}`);
-            console.log(`Canceled: ${event.account.canceled}`);
-            console.log(`Sales Start: ${new Date(event.account.salesStartDate.toNumber() * 1000)}`);
-            console.log(`Sales End: ${new Date(event.account.salesEndDate.toNumber() * 1000)}`);
-            console.log(`Tiers: ${event.account.tiers.length}`);
-            console.log(`Metadata URI: ${event.account.metadataUri}`);
-        });
-
-        // ⭐ SEGUNDO: Testar diferentes offsets para encontrar o campo state
-        const possibleOffsets = [576, 577, 578, 579, 580, 581, 582, 583, 584, 585];
-        
-        for (const offset of possibleOffsets) {
-            try {
-                const testFilter = {
-                    memcmp: {
-                        offset: offset,
-                        bytes: bs58.encode([1]), // Active state
-                    }
-                };
-                const testEvents = await program.account.event.all([testFilter]);
-                if (testEvents.length > 0) {
-                    console.log(`🎉 OFFSET CORRETO ENCONTRADO: ${offset} - encontrou ${testEvents.length} eventos`);
-                    break;
-                }
-            } catch (e) {
-                // Ignora erros de offset inválido
-            }
-        }
-
-        // ⭐ TERCEIRO: Usar o filtro com offset 580 (nosso cálculo)
-        const STATE_FIELD_OFFSET = 580;
-        const activeStateFilter = {
-            memcmp: {
-                offset: STATE_FIELD_OFFSET,
-                bytes: bs58.encode([1]), // 1 para EventState::Active
-            }
-        };
-
-        const onChainEvents = await program.account.event.all([activeStateFilter]);
-        console.log(` -> Found ${onChainEvents.length} events on-chain with 'Active' state.`);
-
-        // ⭐ QUARTO: Filtro adicional por datas e cancelado
         const nowInSeconds = Math.floor(Date.now() / 1000);
-       const fullyActiveEvents = onChainEvents.filter(event => {
-    const acc = event.account;
-    // Compare timestamps directly in seconds
-    const isActiveByDate = nowInSeconds >= acc.salesStartDate.toNumber() && 
-                          nowInSeconds <= acc.salesEndDate.toNumber();
-    
-    console.log(` -> Event ${event.publicKey}: dates ${acc.salesStartDate.toNumber()}-${acc.salesEndDate.toNumber()}, activeByDate: ${isActiveByDate}, canceled: ${acc.canceled}`);
-    
-    return !acc.canceled && isActiveByDate;
-});
+        console.log(` -> Current timestamp: ${nowInSeconds}`);
         
-        console.log(` -> Found ${fullyActiveEvents.length} events that are fully active (dates/not canceled).`);
+        // ⭐ FILTRAR DIRETAMENTE NO JAVASCRIPT
+        const fullyActiveEvents = allEvents.filter(event => {
+            const acc = event.account;
+            
+            // Debug detalhado
+            console.log(`\n--- Checking Event ${event.publicKey} ---`);
+            console.log(`State: ${acc.state}, Canceled: ${acc.canceled}`);
+            console.log(`Sales Start: ${acc.salesStartDate.toNumber()}`);
+            console.log(`Sales End: ${acc.salesEndDate.toNumber()}`);
+            console.log(`Now: ${nowInSeconds}`);
+            
+            const isStateActive = acc.state === 1;
+            const isNotCanceled = !acc.canceled;
+            const isInSalesPeriod = nowInSeconds >= acc.salesStartDate.toNumber() && 
+                                  nowInSeconds <= acc.salesEndDate.toNumber();
+            
+            console.log(`Active State: ${isStateActive}, Not Canceled: ${isNotCanceled}, In Sales Period: ${isInSalesPeriod}`);
+            
+            return isStateActive && isNotCanceled && isInSalesPeriod;
+        });
+        
+        console.log(` -> Found ${fullyActiveEvents.length} events that are fully active.`);
 
-        // Busca de metadados
+        // Busca de metadados para os eventos ativos
         const eventsWithMetadata = await Promise.all(
             fullyActiveEvents.map(async (event) => {
                 try {
@@ -497,6 +463,7 @@ app.get('/events/active', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

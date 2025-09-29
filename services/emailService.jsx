@@ -2,21 +2,28 @@ import { Resend } from 'resend';
 import { render } from '@react-email/render';
 import { jsPDF } from 'jspdf';
 import QRCode from 'qrcode';
+import { TicketEmail } from '../emails/TicketEmail.jsx';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Função que gera o QR Code como uma imagem PNG - CORRIGIDA
+// ⭐ CORREÇÃO: Função simplificada para gerar QR Code sem sharp
 async function createQrCodeImage(mintAddress) {
     try {
         console.log(` -> Gerando QR Code para: ${mintAddress}`);
-        // ⭐ CORREÇÃO: QRCode.toString retorna uma Promise, precisamos await
-        const svgString = await QRCode.toString(mintAddress, { type: 'svg' });
-        // ⭐ CORREÇÃO: Converter a string SVG para Buffer
-        const svgBuffer = Buffer.from(svgString);
-        // Converter SVG para PNG
-        const pngBuffer = await sharp(svgBuffer).png().toBuffer();
+        
+        // ⭐ ALTERNATIVA SIMPLES: Gerar QR Code como Data URL
+        const qrCodeDataUrl = await QRCode.toDataURL(mintAddress, {
+            width: 120,
+            margin: 0,
+            color: {
+                dark: '#000000',
+                light: '#FFFFFF'
+            }
+        });
+        
         console.log('✅ QR Code gerado com sucesso');
-        return pngBuffer;
+        return qrCodeDataUrl;
+        
     } catch (error) {
         console.error('❌ Erro ao gerar QR Code:', error);
         throw error;
@@ -66,8 +73,8 @@ async function generateTicketPDF(ticketData) {
         console.log(' -> Criando documento PDF...');
         const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a5' });
         
-        // ⭐ CORREÇÃO: Aguardar a geração do QR code
-        const qrCodeImageBuffer = await createQrCodeImage(mintAddress);
+        // ⭐ CORREÇÃO: Usar Data URL do QR Code
+        const qrCodeDataUrl = await createQrCodeImage(mintAddress);
         
         // Página 1: Ingresso
         doc.setFontSize(16);
@@ -97,8 +104,14 @@ async function generateTicketPDF(ticketData) {
             doc.text(line, 20, 85 + (index * 5));
         });
         
-        // QR Code
-        doc.addImage(qrCodeImageBuffer, 'PNG', 100, 55, 50, 50);
+        // QR Code - ⭐ CORREÇÃO: Usar Data URL
+        if (qrCodeDataUrl) {
+            doc.addImage(qrCodeDataUrl, 'PNG', 100, 55, 50, 50);
+        } else {
+            // Fallback: texto se o QR Code falhar
+            doc.text('QR Code não disponível', 125, 80, { align: 'center' });
+        }
+        
         doc.setFontSize(6);
         doc.text('CÓDIGO DE VALIDAÇÃO', 125, 108, { align: 'center' });
         doc.text(mintAddress, 125, 112, { align: 'center', maxWidth: 80 });
@@ -169,7 +182,7 @@ async function generateTicketPDF(ticketData) {
 // Função principal que orquestra tudo e envia o e-mail - CORRIGIDA
 export async function sendTicketEmail(userData, ticketData) {
     const { name: userName, email: userEmail } = userData;
-    const { eventName, eventDate, eventLocation } = ticketData;
+    const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey } = ticketData;
 
     if (!userEmail) {
         console.warn("❌ Usuário sem e-mail cadastrado. Pulando envio de ingresso.");
@@ -193,21 +206,16 @@ export async function sendTicketEmail(userData, ticketData) {
         const pdfBuffer = await generateTicketPDF(ticketData);
         console.log("✅ PDF gerado com sucesso");
 
-        // 3. Renderizar template de e-mail (se você tiver um componente TicketEmail)
+        // 3. Renderizar template de e-mail usando seu componente TicketEmail
         console.log("🎨 Renderizando template de e-mail...");
-        let emailHtml = `
-            <html>
-                <body>
-                    <h1>Olá ${userName}!</h1>
-                    <p>Seu ingresso para <strong>${eventName}</strong> está anexo a este e-mail.</p>
-                    <p><strong>Data:</strong> ${new Date(eventDate).toLocaleDateString('pt-BR')}</p>
-                    <p><strong>Local:</strong> ${formatFullAddress(eventLocation).replace(/\n/g, ', ')}</p>
-                    <p>Apresente o QR code na entrada do evento.</p>
-                    <br>
-                    <p>Atenciosamente,<br>Equipe Ticketfy</p>
-                </body>
-            </html>
-        `;
+        const emailHtml = await render(
+            <TicketEmail 
+                userName={userName}
+                eventName={eventName}
+                eventDate={eventDate}
+                eventLocation={formatFullAddress(eventLocation).replace(/\n/g, ', ')}
+            />
+        );
 
         // 4. Enviar e-mail
         console.log(`🚀 Enviando e-mail para: ${userEmail}`);

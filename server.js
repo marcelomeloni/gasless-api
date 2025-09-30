@@ -165,6 +165,13 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
                     mintAddress: mintKeypair.publicKey.toString(),
                     seedPhrase: mnemonic,
                     privateKey: privateKey,
+                        eventImage: metadata.image, // URL da imagem do evento
+    eventDescription: metadata.description,
+    eventCategory: metadata.category,
+    eventTags: metadata.tags,
+    organizerName: metadata.organizer.name,
+    organizerLogo: metadata.organizer.organizerLogo,
+    organizerWebsite: metadata.organizer.website,
                 };
                 
                 // Não usamos 'await' para não bloquear a resposta ao frontend
@@ -247,6 +254,13 @@ app.post('/mint-for-existing-user', async (req, res) => {
                         eventDate: metadata.properties.dateTime.start,
                         eventLocation: metadata.properties.location,
                         mintAddress: mintAddress,
+                          eventImage: metadata.image, // URL da imagem do evento
+    eventDescription: metadata.description,
+    eventCategory: metadata.category,
+    eventTags: metadata.tags,
+    organizerName: metadata.organizer.name,
+    organizerLogo: metadata.organizer.organizerLogo,
+    organizerWebsite: metadata.organizer.website,
                     };
                     
                     sendTicketEmail({ name, email }, ticketDataForEmail);
@@ -661,6 +675,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

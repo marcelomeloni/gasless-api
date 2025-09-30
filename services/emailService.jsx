@@ -1,51 +1,52 @@
 import { Resend } from 'resend';
-import { render } from '@react-email/render';
-import { jsPDF } from 'jspdf';
 import React from 'react';
 import QRCode from 'qrcode';
+
+// 1. IMPORTAÇÕES ATUALIZADAS
+// Removemos 'jspdf' e 'render' do @react-email/render (pois o HTML do e-mail já está em outro arquivo)
+// Adicionamos as ferramentas do @react-pdf/renderer e o novo componente TicketPDF
+import { renderToBuffer } from '@react-pdf/renderer';
+import { TicketPDF } from '../emails/TicketPDF.jsx'; // Assumindo que o novo arquivo se chama TicketPDF.jsx
 import { TicketEmail } from '../emails/TicketEmail.jsx';
+import { render } from '@react-email/render';
+
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ⭐ CORREÇÃO: Função simplificada para gerar QR Code sem sharp
+// 2. CONSTANTE PARA A IMAGEM DO LOGO (BASE64)
+// Para evitar requisições de rede, embutimos o logo da marca como uma string Base64.
+// Isso torna a geração do PDF mais rápida e confiável.
+const BRAND_LOGO_BASE64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAN+SURBVGhD7ZlpyJ9hHMd/L95dhIgoKrqIuBfl4gNxcFEU1EHExVFExRFEVBSdxFGXLrpxaUfcaZTc6KJjH+CiVBwdRRRx4IBzkf+v7+n39PV9f8/3vT/de6/v93N/v+/5fh/P+zxvYWCgfwL8BwyGgqANxW2wFfxbWA17wCvYDW/Al/AWfAEvwTpwA+bBDHj+hcAGWAzL4A04BefBOmgH42ADbAXL4AV4C5bBfPj+F0A/GA+HwQ1wA1bBK/gBzoA34E74BD6DF+BOmAUL4Hj4XwB9YBAcDg/A/wQfw3d/BfSAAXB4pG9eAN8J6AF/gYVweCSt4VfgexLQAy6AgXA4pC1dwffg4xLQA16BwXA4pHX9BH4Kfi2gByyDCHA4pLV9BT+FvxnQAy6A4XA4pLV9A78W/k5ADzgEh8HhEAX6Bv6L/zOgB5yD4+BwCEv7Cv4l/s+AHnAKjsLhEAYGhv4vQA/4DI7D4RCE+gb+E/6vgB5wCA7B4RCG+gb+Y/6fgB5wDI7C4RCG+gb+Y/5/AT3gBByBwyEM9Q38p/y/A3rABTgcDoew1jfw3/J/DeiB34DD4XAIQ30D/5L/x4Ae8AMcDIdDGGsb+If8fx3QAx7D4XA4hLG+gX/I/7dAD7gEDofDISxrG/gX/L8M9IDf4XQ4HMLaBv4l/x+DHvAHnAmHwxhrG/in/H8M9IDz4Uw4HMLaBv4p/y/BXrAjfAjr4d/k/3LYA7fCmXA4hE3gH3vAdXApHIZD2AT+sQfcBYfA4RAMgc8bcBccgEMhDITZ/d7/S3AIDCETGBl2/q/gU/AnXA23w5XQDW/AHfA+/Axfw63wBXwPz4VHYBccDufCXDgjP/f/JWyF6+BGuAv+guvgTrgDboblYAlYDAfAqXBKLgVb4S74BVyBG+E+mAdL4Qo4Fq4Hq+EquAZuhevgrv8Lw0MhDAy6/jeiB0aG3f8b0YORELgU/sf/RPSgaOHz/8f8v9yPQiEsDAy6/gP+4f8i6IF/4XQ4HMLQ/j/jH/7vBD3gj3A6HA5h2G9gvz/z+93P4XAID4O+gQW/BfSAaXC4YJz+7v/jP0f0wBc4XDDO2/7w4/9u0AND4XDBuM/r3/85ogtGxu2Fw7+FwyEY/v5/4f8C9IAv4nBBPw1+APgF/gf6l9k3+iW+qQAAAABJRU5ErkJggg==';
+
+// Função auxiliar para gerar QR Code (permanece a mesma)
 async function createQrCodeImage(mintAddress) {
     try {
         console.log(` -> Gerando QR Code para: ${mintAddress}`);
-        
-        // ⭐ ALTERNATIVA SIMPLES: Gerar QR Code como Data URL
         const qrCodeDataUrl = await QRCode.toDataURL(mintAddress, {
-            width: 120,
-            margin: 0,
-            color: {
-                dark: '#000000',
-                light: '#FFFFFF'
-            }
+            width: 150, // Um pouco maior para melhor qualidade no PDF
+            margin: 1,
+            color: { dark: '#000000', light: '#FFFFFF' }
         });
-        
         console.log('✅ QR Code gerado com sucesso');
         return qrCodeDataUrl;
-        
     } catch (error) {
         console.error('❌ Erro ao gerar QR Code:', error);
         throw error;
     }
 }
 
-// Função auxiliar de formatação de endereço
+// Função auxiliar de formatação de endereço (permanece a mesma)
 const formatFullAddress = (location) => {
     if (!location || typeof location !== 'object') {
         return "Local a definir";
     }
-    
     try {
         if (location.type !== 'Physical' || !location.address) {
             return "Local a definir";
         }
-        
         const { venueName, address } = location;
         const line1 = `${address.street || ''}${address.number ? `, ${address.number}` : ''}`.trim();
         const line2 = `${address.neighborhood ? `${address.neighborhood}, ` : ''}${address.city || ''}${address.state ? ` - ${address.state}` : ''}`.trim();
-        
         return `${venueName || 'Local'}\n${line1}\n${line2}`.trim();
     } catch (error) {
         console.error("Error formatting address:", error);
@@ -53,137 +54,38 @@ const formatFullAddress = (location) => {
     }
 };
 
-// Função que gera o PDF completo em memória - CORRIGIDA
+
+// 3. A NOVA FUNÇÃO `generateTicketPDF` USANDO @react-pdf/renderer
 async function generateTicketPDF(ticketData) {
-    const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey } = ticketData;
-
-    const formatDisplayDate = (dateString) => {
-        if (!dateString) return 'Data a definir';
-        return new Date(dateString).toLocaleString('pt-BR', { 
-            weekday: 'long', 
-            day: '2-digit', 
-            month: 'long', 
-            year: 'numeric', 
-            hour: '2-digit', 
-            minute: '2-digit', 
-            timeZone: 'America/Sao_Paulo' 
-        });
-    };
-
     try {
-        console.log(' -> Criando documento PDF...');
-        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a5' });
-        
-        // ⭐ CORREÇÃO: Usar Data URL do QR Code
-        const qrCodeDataUrl = await createQrCodeImage(mintAddress);
-        
-        // Página 1: Ingresso
-        doc.setFontSize(16);
-        doc.setFont(undefined, 'bold');
-        doc.text('TICKETFY', 105, 20, { align: 'center' });
-        
-        doc.setFontSize(10);
-        doc.setFont(undefined, 'normal');
-        doc.text('INGRESSO DIGITAL NFT', 105, 28, { align: 'center' });
-        
-        doc.setFontSize(14);
-        doc.setFont(undefined, 'bold');
-        doc.text(eventName, 105, 40, { align: 'center', maxWidth: 130 });
-        
-        // Informações do evento
-        doc.setFontSize(8);
-        doc.setFont(undefined, 'bold');
-        doc.text('DATA DO EVENTO', 20, 60);
-        doc.setFont(undefined, 'normal');
-        doc.text(formatDisplayDate(eventDate), 20, 65);
-        
-        doc.setFont(undefined, 'bold');
-        doc.text('LOCALIZAÇÃO', 20, 80);
-        doc.setFont(undefined, 'normal');
-        const locationLines = formatFullAddress(eventLocation).split('\n');
-        locationLines.forEach((line, index) => {
-            doc.text(line, 20, 85 + (index * 5));
-        });
-        
-        // QR Code - ⭐ CORREÇÃO: Usar Data URL
-        if (qrCodeDataUrl) {
-            doc.addImage(qrCodeDataUrl, 'PNG', 100, 55, 50, 50);
-        } else {
-            // Fallback: texto se o QR Code falhar
-            doc.text('QR Code não disponível', 125, 80, { align: 'center' });
-        }
-        
-        doc.setFontSize(6);
-        doc.text('CÓDIGO DE VALIDAÇÃO', 125, 108, { align: 'center' });
-        doc.text(mintAddress, 125, 112, { align: 'center', maxWidth: 80 });
-        
-        // Footer
-        doc.setFontSize(7);
-        doc.text('Este ingresso é um token NFT único na blockchain Solana.', 105, 130, { align: 'center' });
-        doc.text('Apresente este QR code na entrada do evento.', 105, 135, { align: 'center' });
-        doc.text('Após o evento, seu certificado estará disponível em:', 105, 145, { align: 'center' });
-        doc.text(`ticketfy.app/certificate/${mintAddress.slice(0, 8)}...`, 105, 150, { align: 'center' });
+        console.log(' -> Gerando QR Code para o novo PDF...');
+        const qrCodeImage = await createQrCodeImage(ticketData.mintAddress);
 
-        // Página 2: Informações de segurança (se houver)
-        if (seedPhrase && privateKey) {
-            doc.addPage();
-            
-            doc.setFontSize(14);
-            doc.setFont(undefined, 'bold');
-            doc.text('CARTEIRA DIGITAL', 105, 20, { align: 'center' });
-            
-            doc.setFontSize(10);
-            doc.setFont(undefined, 'normal');
-            doc.text('Informações confidenciais para acesso à sua carteira blockchain', 105, 28, { align: 'center', maxWidth: 130 });
-            
-            // Aviso de segurança
-            doc.setFontSize(9);
-            doc.setFont(undefined, 'bold');
-            doc.text('⚠️ INFORMAÇÕES EXTREMAMENTE CONFIDENCIAIS', 20, 45);
-            doc.setFont(undefined, 'normal');
-            doc.text('Estas chaves dão acesso total aos seus ativos digitais. Guarde esta página em', 20, 52, { maxWidth: 160 });
-            doc.text('local seguro e OFFLINE. Nunca compartilhe, fotografe ou digitalize estas', 20, 57, { maxWidth: 160 });
-            doc.text('informações. A perda pode resultar em roubo irreversível.', 20, 62, { maxWidth: 160 });
-            
-            // Seed Phrase
-            doc.setFont(undefined, 'bold');
-            doc.text('Frase de Recuperação (Seed Phrase)', 20, 80);
-            doc.setFont(undefined, 'normal');
-            const words = seedPhrase.split(' ');
-            words.forEach((word, index) => {
-                const row = Math.floor(index / 3);
-                const col = index % 3;
-                const x = 20 + (col * 60);
-                const y = 87 + (row * 6);
-                doc.text(`${index + 1}. ${word}`, x, y);
-            });
-            
-            // Private Key
-            doc.setFont(undefined, 'bold');
-            doc.text('Chave Privada (para importação)', 20, 120);
-            doc.setFont(undefined, 'normal');
-            doc.setFontSize(7);
-            doc.text(privateKey, 20, 127, { maxWidth: 160 });
-            
-            // Aviso final
-            doc.setFontSize(8);
-            doc.text('✅ Recomendamos guardar este documento em cofre físico.', 105, 180, { align: 'center' });
-            doc.text('Estas informações não podem ser recuperadas se perdidas.', 105, 185, { align: 'center' });
-        }
+        console.log(' -> Renderizando componente PDF para buffer...');
         
-        console.log('✅ PDF gerado com sucesso');
-        return Buffer.from(doc.output('arraybuffer'));
-        
+        // `renderToBuffer` pega seu componente React e o transforma em um buffer de PDF.
+        const pdfBuffer = await renderToBuffer(
+            <TicketPDF
+                ticketData={ticketData}
+                qrCodeImage={qrCodeImage}
+                brandLogoImage={BRAND_LOGO_BASE64}
+            />
+        );
+
+        console.log('✅ PDF gerado com sucesso (com @react-pdf/renderer)');
+        return pdfBuffer;
+
     } catch (error) {
-        console.error('❌ Erro ao gerar PDF:', error);
+        console.error('❌ Erro ao gerar PDF com @react-pdf/renderer:', error);
         throw error;
     }
 }
 
-// Função principal que orquestra tudo e envia o e-mail - CORRIGIDA
+
+// Função principal que orquestra tudo e envia o e-mail (agora usando a nova função de PDF)
 export async function sendTicketEmail(userData, ticketData) {
     const { name: userName, email: userEmail } = userData;
-    const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey } = ticketData;
+    const { eventName } = ticketData;
 
     if (!userEmail) {
         console.warn("❌ Usuário sem e-mail cadastrado. Pulando envio de ingresso.");
@@ -193,46 +95,50 @@ export async function sendTicketEmail(userData, ticketData) {
     try {
         console.log(`📧 Iniciando processo de e-mail para: ${userEmail}`);
         
-        // 1. Verificar configuração do Resend
         if (!process.env.RESEND_API_KEY) {
             throw new Error("RESEND_API_KEY está faltando");
         }
-        if (!process.env.FROM_EMAIL) {
-            throw new Error("FROM_EMAIL está faltando");
-        }
         console.log("✅ Variáveis de ambiente verificadas");
 
-        // 2. Gerar PDF
+        // 2. Gerar PDF (agora chama a nova função)
         console.log(`📄 Gerando PDF para o evento: ${eventName}`);
         const pdfBuffer = await generateTicketPDF(ticketData);
-        console.log("✅ PDF gerado com sucesso");
 
-        // 3. Renderizar template de e-mail usando seu componente TicketEmail
+        // 3. Renderizar template de e-mail (permanece o mesmo)
         console.log("🎨 Renderizando template de e-mail...");
         const emailHtml = await render(
             <TicketEmail 
                 userName={userName}
                 eventName={eventName}
-                eventDate={eventDate}
-                eventLocation={formatFullAddress(eventLocation).replace(/\n/g, ', ')}
+                eventDate={ticketData.eventDate}
+                eventLocation={formatFullAddress(ticketData.eventLocation).replace(/\n/g, ', ')}
             />
         );
 
         // 4. Enviar e-mail
         console.log(`🚀 Enviando e-mail para: ${userEmail}`);
-        const result = await resend.emails.send({
-            from: `Ticketfy <${process.env.FROM_EMAIL}>`,
+        
+        // Usando o remetente de teste da Resend para validar o fluxo
+        const fromAddress = 'Ticketfy <onboarding@resend.dev>';
+        
+        const { data, error } = await resend.emails.send({
+            from: fromAddress,
             to: [userEmail],
-            subject: `🎟️ Seu ingresso para: ${eventName}`,
+            subject: `[TESTE] 🎟️ Seu ingresso para: ${eventName}`,
             html: emailHtml,
             attachments: [{
                 filename: `Ingresso_${eventName.replace(/\s/g, '_')}.pdf`,
-                content: pdfBuffer,
+                content: pdfBuffer, // O buffer gerado pelo @react-pdf/renderer
             }],
         });
-        
-        console.log("✅ E-mail enviado com sucesso!");
-        return result;
+
+        if (error) {
+            console.error("❌ Erro retornado pela API da Resend:", error);
+            throw error;
+        }
+
+        console.log("✅ Requisição de e-mail aceita pela Resend! ID:", data.id);
+        return { data, error };
 
     } catch (error) {
         console.error("❌ Erro detalhado no envio do e-mail:", {

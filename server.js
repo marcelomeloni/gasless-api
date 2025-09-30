@@ -458,11 +458,89 @@ app.get('/events/active', async (req, res) => {
         res.status(500).json({ error: "Server error fetching events.", details: error.message });
     }
 });
+app.get('/user-tickets/:ownerAddress', async (req, res) => {
+    const { ownerAddress } = req.params;
+    if (!ownerAddress) {
+        return res.status(400).json({ success: false, error: 'Endereço do proprietário é obrigatório.' });
+    }
+    console.log(`[+] Buscando ingressos para o endereço: ${ownerAddress}`);
 
+    try {
+        const ownerPublicKey = new PublicKey(ownerAddress);
+        const TICKET_ACCOUNT_OWNER_FIELD_OFFSET = 72; // Offset do campo 'owner' na conta Ticket
+
+        // 1. Buscar todas as contas de ingresso para o usuário
+        const userTicketAccounts = await program.account.ticket.all([
+            { memcmp: { offset: TICKET_ACCOUNT_OWNER_FIELD_OFFSET, bytes: ownerPublicKey.toBase58() } }
+        ]);
+
+        if (userTicketAccounts.length === 0) {
+            console.log(` -> Nenhum ingresso encontrado para ${ownerAddress}`);
+            return res.status(200).json({ success: true, tickets: [] });
+        }
+        console.log(` -> Encontrados ${userTicketAccounts.length} ingressos on-chain.`);
+
+        // 2. Otimização: Agrupar ingressos por evento para buscar metadados em lote
+        const eventPublicKeys = [...new Set(userTicketAccounts.map(t => t.account.event.toString()))]
+            .map(pkStr => new PublicKey(pkStr));
+
+        // 3. Buscar as contas dos eventos correspondentes
+        const eventAccounts = await program.account.event.fetchMultiple(eventPublicKeys);
+        
+        // 4. Buscar os metadados de cada evento e criar um mapa para consulta rápida
+        const eventDataMap = new Map();
+        await Promise.all(eventAccounts.map(async (account, index) => {
+            if (account) {
+                try {
+                    const response = await fetch(account.metadataUri);
+                    if (response.ok) {
+                        const metadata = await response.json();
+                        eventDataMap.set(eventPublicKeys[index].toString(), { account, metadata });
+                    }
+                } catch (e) {
+                    console.error(` -> Falha ao buscar metadados para o evento ${eventPublicKeys[index].toString()}:`, e.message);
+                }
+            }
+        }));
+        
+        // 5. Buscar todas as listagens ativas do marketplace
+        const allListings = await program.account.marketplaceListing.all();
+        const listedNftMints = new Set(
+            allListings
+                .filter(l => l.account.price.toNumber() > 0)
+                .map(l => l.account.nftMint.toString())
+        );
+
+        // 6. Combinar os dados: ingresso + metadados do evento + status de listagem
+        const enrichedTickets = userTicketAccounts.map(ticket => {
+            const eventDetails = eventDataMap.get(ticket.account.event.toString());
+            return {
+                publicKey: ticket.publicKey.toString(),
+                account: ticket.account,
+                event: eventDetails || null,
+                isListed: listedNftMints.has(ticket.account.nftMint.toString()),
+            };
+        });
+
+        console.log(`[✔] Retornando ${enrichedTickets.length} ingressos com dados enriquecidos.`);
+        res.status(200).json({
+            success: true,
+            tickets: enrichedTickets,
+        });
+
+    } catch (error) {
+        console.error("[✘] Erro ao buscar ingressos do usuário:", error);
+        if (error.message.includes('Invalid public key')) {
+             return res.status(400).json({ success: false, error: 'O endereço fornecido é inválido.' });
+        }
+        res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os ingressos.' });
+    }
+});
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

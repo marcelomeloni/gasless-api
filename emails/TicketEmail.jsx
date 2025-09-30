@@ -38,11 +38,11 @@ export function TicketEmail({
             <Heading style={h1}>SEU INGRESSO CHEGOU! 🎉</Heading>
             
             <Text style={text}>
-              E aí, <strong style={highlight}>{userName}</strong>! 
+              Olá, <strong style={highlight}>{userName}</strong>!! 
             </Text>
             
             <Text style={text}>
-              Você garantiu seu lugar no <strong>{eventName}</strong> - {eventDescription}
+              Você garantiu seu lugar no <strong>{eventName}</strong>
             </Text>
 
             {/* DETALHES DO EVENTO */}

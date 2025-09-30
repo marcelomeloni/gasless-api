@@ -581,10 +581,87 @@ app.get('/event-details/:eventAddress', async (req, res) => {
         res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os dados do evento.' });
     }
 });
+app.post('/validate-ticket', async (req, res) => {
+    const { eventAddress, nftMint, validatorAddress } = req.body;
+
+    if (!eventAddress || !nftMint || !validatorAddress) {
+        return res.status(400).json({ success: false, error: "Parâmetros 'eventAddress', 'nftMint', e 'validatorAddress' são obrigatórios." });
+    }
+    console.log(`[+] Iniciando validação para o ingresso: ${nftMint}`);
+
+    try {
+        const eventPubkey = new PublicKey(eventAddress);
+        const nftMintPubkey = new PublicKey(nftMint);
+        const validatorPubkey = new PublicKey(validatorAddress);
+
+        // 1. Verificar se o endereço fornecido é realmente um validador do evento
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const isValidator = eventAccount.validators.some(v => v.equals(validatorPubkey));
+        if (!isValidator) {
+            console.warn(` -> TENTATIVA DE VALIDAÇÃO NEGADA: ${validatorAddress} não é um validador para este evento.`);
+            return res.status(403).json({ success: false, error: "Acesso negado. A carteira fornecida não é um validador autorizado para este evento." });
+        }
+        console.log(` -> Validador ${validatorAddress} autorizado.`);
+
+        // 2. Encontrar a conta do ingresso para descobrir o dono (owner)
+        // O offset para o campo `nftMint` na conta `Ticket` é 8 (discriminator) + 32 (event) = 40
+        const TICKET_NFT_MINT_FIELD_OFFSET = 40; 
+        const tickets = await program.account.ticket.all([
+            { memcmp: { offset: TICKET_NFT_MINT_FIELD_OFFSET, bytes: nftMintPubkey.toBase58() } }
+        ]);
+
+        if (tickets.length === 0) {
+            return res.status(404).json({ success: false, error: "Ingresso (conta de ticket) não encontrado na blockchain." });
+        }
+        const ticketAccount = tickets[0];
+        const ownerPubkey = ticketAccount.account.owner;
+        console.log(` -> Ingresso encontrado. Dono: ${ownerPubkey.toString()}`);
+        
+        // 3. Derivar as contas necessárias para a instrução
+        const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), nftMintPubkey.toBuffer()], program.programId);
+        const nftTokenAccount = await getAssociatedTokenAddress(nftMintPubkey, ownerPubkey);
+
+        // 4. Chamar a instrução `redeemTicket`
+        // A API (payerKeypair) paga pela transação, mas a instrução só funciona
+        // porque o `validatorPubkey` é passado como uma das contas, satisfazendo as constraints do programa.
+        const signature = await program.methods.redeemTicket().accounts({ 
+            ticket: ticketPda, 
+            event: eventPubkey, 
+            validator: validatorPubkey, 
+            owner: ownerPubkey, 
+            nftToken: nftTokenAccount, 
+            nftMint: nftMintPubkey 
+        }).rpc();
+        
+        console.log(`[✔] Ingresso validado com sucesso! Assinatura: ${signature}`);
+
+        // Opcional: buscar o nome do dono no Supabase para retornar uma resposta mais rica
+        let ownerName = null;
+        try {
+            const { data: profile } = await supabase.from('profiles').select('name').eq('wallet_address', ownerPubkey.toString()).single();
+            if (profile) ownerName = profile.name;
+        } catch (e) { 
+            console.warn(`-> Perfil do Supabase não encontrado para o dono ${ownerPubkey.toString()}`);
+        }
+
+        res.status(200).json({ 
+            success: true, 
+            signature,
+            ownerName: ownerName || `Participante (${ownerPubkey.toString().slice(0,6)}...)`
+        });
+
+    } catch (error) {
+        console.error("[✘] Erro durante a validação do ingresso:", error);
+        const anchorError = anchor.AnchorError.parse(error.logs);
+        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
+        res.status(500).json({ success: false, error: "Erro do servidor durante a validação.", details: errorMessage || "Erro desconhecido" });
+    }
+});
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -1,6 +1,7 @@
 import { Resend } from 'resend';
 import { render } from '@react-email/render';
 import { jsPDF } from 'jspdf';
+import React from 'react';
 import QRCode from 'qrcode';
 import { TicketEmail } from '../emails/TicketEmail.jsx';
 

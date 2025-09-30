@@ -536,10 +536,56 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
         res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os ingressos.' });
     }
 });
+app.get('/event-details/:eventAddress', async (req, res) => {
+    const { eventAddress } = req.params;
+    if (!eventAddress) {
+        return res.status(400).json({ success: false, error: 'O endereço do evento é obrigatório.' });
+    }
+    console.log(`[+] Buscando detalhes para o evento: ${eventAddress}`);
+
+    try {
+        const eventPubkey = new PublicKey(eventAddress);
+
+        // 1. Busca os dados on-chain do evento
+        const account = await program.account.event.fetch(eventPubkey);
+        console.log(` -> Dados on-chain encontrados.`);
+
+        // 2. Busca os metadados off-chain
+        const metadataResponse = await fetch(account.metadataUri);
+        if (!metadataResponse.ok) {
+            throw new Error(`Falha ao buscar metadados da URI: ${account.metadataUri}`);
+        }
+        const metadata = await metadataResponse.json();
+        console.log(` -> Metadados off-chain encontrados: ${metadata.name}`);
+
+        // 3. Combina tudo em uma única resposta
+        res.status(200).json({
+            success: true,
+            event: {
+                account: account,
+                metadata: metadata,
+            },
+        });
+
+    } catch (error) {
+        console.error("[✘] Erro ao buscar detalhes do evento:", error);
+        
+        // Trata erros comuns, como evento não encontrado
+        if (error.message.includes('Account does not exist')) {
+            return res.status(404).json({ success: false, error: 'Evento não encontrado.' });
+        }
+        if (error.message.includes('Invalid public key')) {
+             return res.status(400).json({ success: false, error: 'O endereço do evento fornecido é inválido.' });
+        }
+
+        res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os dados do evento.' });
+    }
+});
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

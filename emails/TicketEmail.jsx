@@ -1,9 +1,16 @@
 import * as React from 'react';
-import { Html, Head, Body, Container, Heading, Text, Img, Section, Hr, Button } from '@react-email/components';
+import { Html, Head, Body, Container, Heading, Text, Img, Section, Hr, Button, Row, Column } from '@react-email/components';
 
-// Este é um componente React que define a aparência do seu e-mail.
-// Este é um componente React que define a aparência do seu e-mail.
-export function TicketEmail({ userName, eventName, eventDate, eventLocation, eventImage, organizerName, organizerLogo }) {
+export function TicketEmail({ 
+  userName, 
+  eventName, 
+  eventDate, 
+  eventLocation, 
+  eventImage,
+  organizerName,
+  organizerLogo,
+  eventDescription 
+}) {
   const formattedDate = new Date(eventDate).toLocaleString('pt-BR', {
     dateStyle: 'full',
     timeStyle: 'short',
@@ -15,95 +22,211 @@ export function TicketEmail({ userName, eventName, eventDate, eventLocation, eve
       <Head />
       <Body style={main}>
         <Container style={container}>
-          <Img
-            src="https://red-obedient-stingray-854.mypinata.cloud/ipfs/bafkreigpqj7473y2mly3dn6rjnnm3ww4cngbz6kjkgeagt7ifxe2d2g53u"
-            width="120"
-            alt="Ticketfy Logo"
-            style={logo}
-          />
-          <Heading style={h1}>Seu ingresso chegou!</Heading>
-          <Text style={text}>
-            Olá, <strong>{userName}</strong>!
-          </Text>
-          <Text style={text}>
-            Obrigado por garantir sua presença. Seu ingresso para o evento <strong>{eventName}</strong> está anexado a este e-mail.
-          </Text>
-          
-          {/* Nova Imagem do Evento */}
-          {eventImage && (
+          {/* Banner do Evento em Destaque */}
+          <Section style={bannerSection}>
             <Img
               src={eventImage}
               width="100%"
-              alt={`Imagem do evento: ${eventName}`}
-              style={eventImageStyle}
+              alt={`Banner do evento: ${eventName}`}
+              style={bannerImage}
             />
-          )}
-
-          <Section style={ticketDetails}>
-            <Text style={detailLabel}>Evento:</Text>
-            <Text style={detailValue}>{eventName}</Text>
-            <Hr style={hr} />
-            <Text style={detailLabel}>Data:</Text>
-            <Text style={detailValue}>{formattedDate}</Text>
-            <Hr style={hr} />
-            <Text style={detailLabel}>Local:</Text>
-            <Text style={detailValue}>{eventLocation}</Text>
+            <Section style={overlayText}>
+              <Heading style={h1}>SEU INGRESSO ESTÁ PRONTO! 🎉</Heading>
+              <Text style={subtitle}>Prepare-se para uma experiência incrível</Text>
+            </Section>
           </Section>
 
-          {/* Nova Seção do Organizador */}
+          {/* Mensagem Pessoal */}
+          <Section style={messageSection}>
+            <Text style={text}>
+              E aí, <strong style={highlight}>{userName}</strong>! 
+            </Text>
+            <Text style={text}>
+              Você acaba de garantir seu lugar no <strong>{eventName}</strong> - 
+              {eventDescription}
+            </Text>
+          </Section>
+
+          {/* Grid de Informações em Destaque */}
+          <Section style={gridSection}>
+            <Row>
+              <Column style={gridColumn}>
+                <Img
+                  src="https://cdn-icons-png.flaticon.com/512/833/833593.png"
+                  width="40"
+                  height="40"
+                  alt="Ícone de calendário"
+                  style={icon}
+                />
+                <Text style={gridLabel}>QUANDO</Text>
+                <Text style={gridValue}>{formattedDate}</Text>
+              </Column>
+              <Column style={gridColumn}>
+                <Img
+                  src="https://cdn-icons-png.flaticon.com/512/684/684809.png"
+                  width="40"
+                  height="40"
+                  alt="Ícone de localização"
+                  style={icon}
+                />
+                <Text style={gridLabel}>ONDE</Text>
+                <Text style={gridValue}>{eventLocation.replace(/\n/g, ', ')}</Text>
+              </Column>
+            </Row>
+          </Section>
+
+          {/* Organizador */}
           <Section style={organizerSection}>
             <Text style={organizerLabel}>Realização:</Text>
-            <Container style={organizerContainer}>
+            <Section style={organizerContainer}>
               {organizerLogo && (
                 <Img
                   src={organizerLogo}
-                  width="40"
-                  height="40"
+                  width="50"
+                  height="50"
                   alt={`Logo do organizador: ${organizerName}`}
                   style={organizerLogoStyle}
                 />
               )}
               <Text style={organizerName}>{organizerName}</Text>
-            </Container>
+            </Section>
           </Section>
 
-          {/* Novo Botão de Ação (CTA) */}
+          {/* Call-to-Action */}
           <Section style={ctaSection}>
-            <Button href="https://sua-url-de-detalhes.com" style={buttonStyle}>
-              Ver Detalhes do Evento
-            </Button>
+            <Text style={ctaText}>Seu ingresso está anexado a este e-mail em PDF!</Text>
+            <Text style={ctaSubtext}>Guarde bem e nos vemos no evento! ✨</Text>
           </Section>
 
-          <Text style={text}>
-            Nos vemos lá!
-          </Text>
-          <Text style={footer}>
-            Equipe Ticketfy
-          </Text>
+          {/* Footer */}
+          <Section style={footerSection}>
+            <Text style={footerText}>
+              Equipe Ticketfy • Este ingresso é pessoal e intransferível
+            </Text>
+          </Section>
         </Container>
       </Body>
     </Html>
   );
 }
 
-// Adicione esses novos estilos ao seu objeto de estilos existente
-const eventImageStyle = {
-  margin: '20px 0',
-  borderRadius: '8px',
+// Estilos atualizados para o visual moderno
+const main = {
+  backgroundColor: '#0f0f0f',
+  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Ubuntu, sans-serif',
+  padding: '20px 0',
+};
+
+const container = {
+  backgroundColor: '#ffffff',
+  margin: '0 auto',
+  maxWidth: '700px',
+  borderRadius: '12px',
+  overflow: 'hidden',
+  boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
+};
+
+const bannerSection = {
+  position: 'relative',
+  margin: '0',
+};
+
+const bannerImage = {
+  width: '100%',
+  height: '300px',
+  objectFit: 'cover',
+  display: 'block',
+};
+
+const overlayText = {
+  position: 'absolute',
+  top: '0',
+  left: '0',
+  right: '0',
+  bottom: '0',
+  backgroundColor: 'rgba(0,0,0,0.4)',
+  display: 'flex',
+  flexDirection: 'column',
+  justifyContent: 'center',
+  alignItems: 'center',
+  padding: '20px',
+  textAlign: 'center',
+};
+
+const h1 = {
+  color: '#ffffff',
+  fontSize: '36px',
+  fontWeight: 'bold',
+  margin: '0 0 10px 0',
+  textShadow: '2px 2px 4px rgba(0,0,0,0.5)',
+};
+
+const subtitle = {
+  color: '#f0f0f0',
+  fontSize: '18px',
+  margin: '0',
+  fontWeight: 'normal',
+};
+
+const messageSection = {
+  padding: '30px',
+  backgroundColor: '#f8fafc',
+};
+
+const text = {
+  color: '#334155',
+  fontSize: '16px',
+  lineHeight: '24px',
+  margin: '0 0 16px 0',
+};
+
+const highlight = {
+  color: '#6366f1',
+};
+
+const gridSection = {
+  padding: '30px',
+  backgroundColor: '#ffffff',
+};
+
+const gridColumn = {
+  padding: '20px',
+  textAlign: 'center',
+  verticalAlign: 'top',
+  width: '50%',
+};
+
+const icon = {
+  margin: '0 auto 12px auto',
+};
+
+const gridLabel = {
+  color: '#64748b',
+  fontSize: '12px',
+  textTransform: 'uppercase',
+  fontWeight: 'bold',
+  margin: '0 0 8px 0',
+};
+
+const gridValue = {
+  color: '#1e293b',
+  fontSize: '14px',
+  fontWeight: 'bold',
+  lineHeight: '20px',
+  margin: '0',
 };
 
 const organizerSection = {
-  margin: '20px 30px',
-  padding: '16px',
-  backgroundColor: '#f8fafc',
-  borderRadius: '8px',
+  padding: '20px 30px',
+  backgroundColor: '#f1f5f9',
+  borderTop: '1px solid #e2e8f0',
 };
 
 const organizerLabel = {
   color: '#64748b',
   fontSize: '12px',
   textTransform: 'uppercase',
-  marginBottom: '8px',
+  margin: '0 0 8px 0',
 };
 
 const organizerContainer = {
@@ -113,25 +236,42 @@ const organizerContainer = {
 };
 
 const organizerLogoStyle = {
-  borderRadius: '4px',
+  borderRadius: '6px',
 };
 
 const organizerName = {
-  color: '#1d2333',
+  color: '#1e293b',
   fontSize: '16px',
   fontWeight: 'bold',
 };
 
 const ctaSection = {
+  padding: '30px',
+  backgroundColor: '#6366f1',
   textAlign: 'center',
-  margin: '30px',
 };
 
-const buttonStyle = {
-  backgroundColor: '#6366f1',
+const ctaText = {
   color: '#ffffff',
-  padding: '12px 24px',
-  borderRadius: '6px',
-  textDecoration: 'none',
+  fontSize: '18px',
   fontWeight: 'bold',
+  margin: '0 0 8px 0',
+};
+
+const ctaSubtext = {
+  color: '#e0e7ff',
+  fontSize: '14px',
+  margin: '0',
+};
+
+const footerSection = {
+  padding: '20px 30px',
+  backgroundColor: '#1e293b',
+  textAlign: 'center',
+};
+
+const footerText = {
+  color: '#94a3b8',
+  fontSize: '12px',
+  margin: '0',
 };

@@ -36,7 +36,7 @@ if (!SOLANA_RPC_URL || !PAYER_MNEMONIC || !SUPABASE_URL || !SUPABASE_SERVICE_KEY
     throw new Error("Required environment variables are missing (Solana or Supabase).");
 }
 
-const PROGRAM_ID = new PublicKey("Cc38JtDKCBWoMnqAaM32F3aT21uo7KdHFe27fdR24fyy");
+const PROGRAM_ID = new PublicKey("5kQZsq3z1P9TQuR2tBXJjhKr46JnEcsDKYDnEfNCB792");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 // --- SUPABASE CLIENT SETUP ---
@@ -675,6 +675,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

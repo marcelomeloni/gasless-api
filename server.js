@@ -83,10 +83,10 @@ const upsertUserInSupabase = async (userData) => {
 };
 
 // ====================================================================
-// --- Endpoint 1: WEB2 ONBOARDING ---
+// --- Endpoint 1: WEB2 ONBOARDING (PIX/FREE) ---
 // ====================================================================
 app.post('/generate-wallet-and-mint', async (req, res) => {
-    const { eventAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
+    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
     if (!eventAddress || tierIndex === undefined || !name || !phone) {
         return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
     }
@@ -105,76 +105,65 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         const selectedTier = eventAccount.tiers[tierIndex];
         if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
 
-        const isFree = selectedTier.priceLamports.toNumber() === 0;
+        // ✅ MUDANÇA 1: A lógica de preço é baseada no valor BRL (passado pelo servidor, 0 se gratuito)
+        const priceFromContract = selectedTier.priceBrlCents.toNumber() || 0;
+        
+        // Verificação de segurança (Opcional, mas recomendado: verifica se o preço pago via PIX bate com o preço do contrato)
+        if (priceBRLCents && priceBRLCents !== priceFromContract) {
+            console.warn(`[WARN] Price mismatch: Sent ${priceBRLCents}, Contract ${priceFromContract}`);
+            // A API de pagamento deve ter validado o PIX antes, mas esta é uma checagem final.
+        }
+
         const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
         const dataHash = createHash('sha256').update(userDataString).digest();
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
 
+        // 1. Registrar Usuário (Se necessário)
         await program.methods.registerUser(Array.from(dataHash)).accounts({
             authority: newUserPublicKey, userProfile: userProfilePda,
             payer: payerKeypair.publicKey, systemProgram: SystemProgram.programId,
         }).rpc();
 
+        // 2. Criar Contador de Ingresso
         const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
         await program.methods.createBuyerCounter().accounts({
             payer: payerKeypair.publicKey, event: eventPubkey, buyer: newUserPublicKey,
             buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
         }).rpc();
         
+        // 3. Mintar Ingresso (Usando mint_ticket, que agora é a função genérica de emissão)
         const mintKeypair = Keypair.generate();
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
-        let signature;
-        if (isFree) {
-            signature = await program.methods.mintFreeTicket(tierIndex).accounts({
-                globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
-                mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
-                associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
-            }).signers([payerKeypair, mintKeypair]).rpc();
-        } else {
-            const [refundReservePda] = PublicKey.findProgramAddressSync([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], program.programId);
-            const lamportsToFund = selectedTier.priceLamports.toNumber() + 2000000;
-            const fundInstruction = SystemProgram.transfer({ fromPubkey: payerKeypair.publicKey, toPubkey: newUserPublicKey, lamports: lamportsToFund });
-            const mintInstruction = await program.methods.mintTicket(tierIndex).accounts({
-                globalConfig: globalConfigPda, event: eventPubkey, refundReserve: refundReservePda, buyer: newUserPublicKey,
-                buyerTicketCount: buyerTicketCountPda, mintAccount: mintKeypair.publicKey, metadataAccount: metadataPda,
-                associatedTokenAccount, tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID, tokenProgram: TOKEN_PROGRAM_ID,
-                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY, ticket: ticketPda,
-            }).instruction();
-            const transaction = new Transaction().add(fundInstruction, mintInstruction);
-            signature = await program.provider.sendAndConfirm(transaction, [payerKeypair, newUserKeypair, mintKeypair]);
-        }
+        // ✅ MUDANÇA 2: Usamos mint_ticket que agora é a função de emissão pós-pagamento
+        const signature = await program.methods.mintTicket(tierIndex).accounts({
+            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
+            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
+        }).signers([payerKeypair, mintKeypair]).rpc();
+        
         
         console.log(`[✔] Onboarding successful! Sig: ${signature}`);
         
-        // ✨ 2. DISPARA O ENVIO DO E-MAIL EM SEGUNDO PLANO ✨
+        // ✨ DISPARA O ENVIO DO E-MAIL EM SEGUNDO PLANO ✨
         if (email) {
             try {
                 const metadataResponse = await fetch(eventAccount.metadataUri);
                 const metadata = await metadataResponse.json();
 
                 const ticketDataForEmail = {
-                    eventName: metadata.name,
-                    eventDate: metadata.properties.dateTime.start,
-                    eventLocation: metadata.properties.location,
-                    mintAddress: mintKeypair.publicKey.toString(),
-                    seedPhrase: mnemonic,
-                    privateKey: privateKey,
-                        eventImage: metadata.image, // URL da imagem do evento
-    eventDescription: metadata.description,
-    eventCategory: metadata.category,
-    eventTags: metadata.tags,
-    organizerName: metadata.organizer.name,
-    organizerLogo: metadata.organizer.organizerLogo,
-    organizerWebsite: metadata.organizer.website,
+                    eventName: metadata.name, eventDate: metadata.properties.dateTime.start,
+                    eventLocation: metadata.properties.location, mintAddress: mintKeypair.publicKey.toString(),
+                    seedPhrase: mnemonic, privateKey: privateKey, eventImage: metadata.image, 
+                    eventDescription: metadata.description, eventCategory: metadata.category, 
+                    eventTags: metadata.tags, organizerName: metadata.organizer.name,
+                    organizerLogo: metadata.organizer.organizerLogo, organizerWebsite: metadata.organizer.website,
                 };
-                
-                // Não usamos 'await' para não bloquear a resposta ao frontend
                 sendTicketEmail({ name, email }, ticketDataForEmail);
             } catch (e) {
                 console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
@@ -191,10 +180,10 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
     }
 });
 // ====================================================================
-// --- Endpoint 2: MINT FOR EXISTING WEB3 USERS ---
+// --- Endpoint 2: MINT FOR EXISTING WEB3 USERS (PÓS-PIX) ---
 // ====================================================================
 app.post('/mint-for-existing-user', async (req, res) => {
-    const { eventAddress, buyerAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
+    const { eventAddress, buyerAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
     if (!eventAddress || !buyerAddress || tierIndex === undefined) {
         return res.status(400).json({ error: "'eventAddress', 'buyerAddress', e 'tierIndex' são obrigatórios." });
     }
@@ -208,7 +197,14 @@ app.post('/mint-for-existing-user', async (req, res) => {
             wallet_address: buyer.toString(),
             name, phone, email, company, sector, role
         });
+        
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const selectedTier = eventAccount.tiers[tierIndex];
+        if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
 
+        // ✅ MUDANÇA 1: Sem a necessidade de checagem de SOL ou refundReserve
+
+        // 1. Garantir Perfil e Contador
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), buyer.toBuffer()], program.programId);
         const userProfileAccount = await connection.getAccountInfo(userProfilePda);
         if (!userProfileAccount) {
@@ -229,20 +225,28 @@ app.post('/mint-for-existing-user', async (req, res) => {
                 buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
             }).rpc();
         }
-
-        const eventAccount = await program.account.event.fetch(eventPubkey);
-        const selectedTier = eventAccount.tiers[tierIndex];
-        if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
-        const isFree = selectedTier.priceLamports.toNumber() === 0;
-
+        
+        // 2. Mintar Ingresso (Instrução única, paga pelo servidor)
         const mintKeypair = Keypair.generate();
-        const mintAddress = mintKeypair.publicKey.toString(); // Guardamos o endereço do mint para usar depois
+        const mintAddress = mintKeypair.publicKey.toString(); 
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, buyer);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
-        // Função auxiliar para disparar o e-mail, evitando repetição de código
+        // ✅ MUDANÇA 2: Usamos mint_ticket (antiga mint_free_ticket)
+        const signature = await program.methods.mintTicket(tierIndex).accounts({
+            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: buyer,
+            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
+        }).signers([payerKeypair, mintKeypair]).rpc();
+
+
+        console.log(`[✔] Mint bem-sucedido para usuário existente! Sig: ${signature}`);
+
+        // Função auxiliar para disparar o e-mail
         const triggerEmail = async () => {
             if (email) {
                 try {
@@ -250,69 +254,30 @@ app.post('/mint-for-existing-user', async (req, res) => {
                     const metadata = await metadataResponse.json();
                     
                     const ticketDataForEmail = {
-                        eventName: metadata.name,
-                        eventDate: metadata.properties.dateTime.start,
-                        eventLocation: metadata.properties.location,
-                        mintAddress: mintAddress,
-                          eventImage: metadata.image, // URL da imagem do evento
-    eventDescription: metadata.description,
-    eventCategory: metadata.category,
-    eventTags: metadata.tags,
-    organizerName: metadata.organizer.name,
-    organizerLogo: metadata.organizer.organizerLogo,
-    organizerWebsite: metadata.organizer.website,
+                        eventName: metadata.name, eventDate: metadata.properties.dateTime.start,
+                        eventLocation: metadata.properties.location, mintAddress: mintAddress,
+                        // Sem seedPhrase ou privateKey aqui, pois é uma carteira externa
+                        eventImage: metadata.image, eventDescription: metadata.description, 
+                        eventCategory: metadata.category, eventTags: metadata.tags, 
+                        organizerName: metadata.organizer.name, organizerLogo: metadata.organizer.organizerLogo, 
+                        organizerWebsite: metadata.organizer.website,
                     };
                     
                     sendTicketEmail({ name, email }, ticketDataForEmail);
                 } catch (e) {
-                    console.error("Falha ao preparar/enviar e-mail (mas o mint funcionou):", e);
+                    console.error("Falha ao preparar/enviar e-mail:", e);
                 }
             }
         };
 
-        if (isFree) {
-            const signature = await program.methods.mintFreeTicket(tierIndex).accounts({
-                globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: buyer,
-                mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
-                associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
-            }).signers([payerKeypair, mintKeypair]).rpc();
-            
-            console.log(`[✔] Mint gratuito bem-sucedido! Sig: ${signature}`);
-            
-            triggerEmail(); // Dispara o e-mail
-            
-            res.status(200).json({ success: true, isPaid: false, signature, mintAddress: mintAddress });
-        } else {
-            const [refundReservePda] = PublicKey.findProgramAddressSync([Buffer.from("refund_reserve"), eventPubkey.toBuffer()], program.programId);
-            const mintInstruction = await program.methods.mintTicket(tierIndex).accounts({
-                globalConfig: globalConfigPda, event: eventPubkey, refundReserve: refundReservePda, buyer: buyer,
-                buyerTicketCount: buyerTicketCountPda, mintAccount: mintKeypair.publicKey, metadataAccount: metadataPda,
-                associatedTokenAccount, tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID, tokenProgram: TOKEN_PROGRAM_ID,
-                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY, ticket: ticketPda,
-            }).instruction();
-            
-            const transaction = new Transaction().add(mintInstruction);
-            transaction.feePayer = buyer;
-            transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-            transaction.partialSign(mintKeypair);
-            
-            const serializedTransaction = transaction.serialize({ requireAllSignatures: false });
-            
-            console.log(`[✔] Transação de mint pago criada para o usuário assinar.`);
+        triggerEmail();
 
-            // Para ingressos pagos, o ideal é o frontend notificar a API após a confirmação.
-            // Por simplicidade, enviamos o e-mail de forma otimista.
-            triggerEmail(); // Dispara o e-mail
-
-            res.status(200).json({ success: true, isPaid: true, transaction: serializedTransaction.toString('base64'), mintAddress: mintAddress });
-        }
+        res.status(200).json({ success: true, isPaid: true, signature, mintAddress: mintAddress });
     } catch (error) {
         console.error("[✘] Erro ao mintar para usuário existente:", error);
         const anchorError = anchor.AnchorError.parse(error.logs);
-        const errorMessage = anchorError ? anchorError.error.errorMessage : "Ocorreu um erro desconhecido.";
-        res.status(500).json({ error: "Erro do servidor ao mintar para usuário existente.", details: errorMessage });
+        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
+        res.status(500).json({ success: false, error: "Erro do servidor ao mintar para usuário existente.", details: errorMessage || "Erro desconhecido" });
     }
 });
 
@@ -675,6 +640,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

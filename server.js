@@ -179,6 +179,51 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         res.status(500).json({ error: "Server error during onboarding.", details: errorMessage || "Unknown error" });
     }
 });
+app.get('/check-organizer-permission/:walletAddress', async (req, res) => {
+    const { walletAddress } = req.params;
+    if (!walletAddress) {
+        return res.status(400).json({ success: false, error: 'O endereço da carteira é obrigatório.' });
+    }
+
+    try {
+        const walletPubkey = new PublicKey(walletAddress);
+        let isAllowed = false;
+
+        // 1. Verificar permissão de Admin (GlobalConfig)
+        try {
+            const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+            const globalConfig = await program.account.globalConfig.fetch(globalConfigPda);
+            if (globalConfig.authority.equals(walletPubkey)) {
+                isAllowed = true;
+            }
+        } catch (e) {
+            // Ignora erro se o GlobalConfig não existir (ainda não inicializado)
+            if (!e.message.includes("Account does not exist")) {
+                console.error("Erro ao buscar GlobalConfig:", e);
+            }
+        }
+
+        // 2. Verificar permissão de Whitelist, apenas se não for Admin
+        if (!isAllowed) {
+            try {
+                const [whitelistPda] = PublicKey.findProgramAddressSync([Buffer.from("whitelist"), walletPubkey.toBuffer()], program.programId);
+                const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
+                if (whitelistAccount.isWhitelisted) {
+                    isAllowed = true;
+                }
+            } catch (e) {
+                // Ignora erro se a conta da Whitelist não existir
+            }
+        }
+        
+        console.log(`[✔] Permissão verificada para ${walletAddress}: ${isAllowed}`);
+        res.status(200).json({ success: true, isAllowed });
+
+    } catch (error) {
+        console.error("[✘] Erro na verificação de permissão:", error);
+        res.status(500).json({ success: false, error: 'Erro no servidor ao verificar permissões.' });
+    }
+});
 // ====================================================================
 // --- Endpoint 2: MINT FOR EXISTING WEB3 USERS (PÓS-PIX) ---
 // ====================================================================
@@ -640,6 +685,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

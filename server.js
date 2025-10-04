@@ -283,6 +283,17 @@ app.post('/api/generate-payment-qr', async (req, res) => {
         const description = `Ingresso: ${eventName} - ${tierName}`;
         const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
 
+        // Obter URLs base com fallbacks robustos
+        const API_URL = process.env.API_URL || 'https://gasless-api-ke68.onrender.com';
+        const FRONTEND_URL = process.env.FRONTEND_URL || 'https://seu-frontend.onrender.com';
+
+        console.log('API_URL:', API_URL);
+        console.log('FRONTEND_URL:', FRONTEND_URL);
+
+        // Garantir que as URLs sejam válidas
+        const cleanApiUrl = API_URL.replace(/\/$/, '');
+        const cleanFrontendUrl = FRONTEND_URL.replace(/\/$/, '');
+
         // Create Mercado Pago preference data for QR code
         const preferenceData = {
             items: [
@@ -308,17 +319,20 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             },
             statement_descriptor: `EVENTO-${eventName.substring(0, 10)}`,
             external_reference: externalReference,
-            notification_url: `${process.env.API_URL || 'http://localhost:3001'}/webhooks/mercadopago`,
+            notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
             expires: true,
             expiration_date_from: new Date().toISOString(),
             expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
             back_urls: {
-                success: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/success`,
-                failure: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/failure`,
-                pending: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/pending`
+                success: `${cleanFrontendUrl}/payment/success`,
+                failure: `${cleanFrontendUrl}/payment/failure`, 
+                pending: `${cleanFrontendUrl}/payment/pending`
             },
-            auto_return: 'approved',
+            // ⚠️ REMOVER auto_return ou garantir URLs válidas
+            // auto_return: 'approved',
         };
+
+        console.log('Preference data:', JSON.stringify(preferenceData, null, 2));
 
         // CORREÇÃO: Use um nome diferente para a instância
         const preferenceClient = new Preference(client);
@@ -352,8 +366,8 @@ app.post('/api/generate-payment-qr', async (req, res) => {
 
         res.status(200).json({
             success: true,
-            qrCode: response.point_of_interaction.transaction_data.qr_code,
-            qrCodeBase64: response.point_of_interaction.transaction_data.qr_code_base64,
+            qrCode: response.point_of_interaction?.transaction_data?.qr_code,
+            qrCodeBase64: response.point_of_interaction?.transaction_data?.qr_code_base64,
             externalReference: externalReference,
             ticketUrl: response.init_point,
             preferenceId: response.id,
@@ -363,10 +377,16 @@ app.post('/api/generate-payment-qr', async (req, res) => {
 
     } catch (error) {
         console.error('Error generating Mercado Pago QR code:', error);
+        console.error('Error details:', error.response?.data || error.message);
+        
         res.status(500).json({
             success: false,
             error: 'Failed to generate payment QR code',
-            details: error.message
+            details: error.message,
+            debug: process.env.NODE_ENV === 'development' ? {
+                apiUrl: process.env.API_URL,
+                frontendUrl: process.env.FRONTEND_URL
+            } : undefined
         });
     }
 });
@@ -1456,3 +1476,4 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+

@@ -2,20 +2,23 @@ import { Resend } from 'resend';
 import React from 'react';
 import QRCode from 'qrcode';
 import { renderToBuffer } from '@react-pdf/renderer';
-import { TicketPDF } from '../emails/TicketPDF.jsx';
-import { TicketEmail } from '../emails/TicketEmail.jsx';
+import { TicketPDF } from '../emails/TicketPDF.jsx'; // Verifique se o caminho está correto
+import { TicketEmail } from '../emails/TicketEmail.jsx'; // Verifique se o caminho está correto
 import { render } from '@react-email/render';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// CONSTANTE ATUALIZADA - Agora é uma URL válida
-const BRAND_LOGO_BASE64 = 'https://red-obedient-stingray-854.mypinata.cloud/ipfs/bafkreih7ofsa246z5vnjvrol6xk5tpj4zys42tcaotxq7tp7ptgraalrya';
+const BRAND_LOGO_URL = 'https://red-obedient-stingray-854.mypinata.cloud/ipfs/bafkreih7ofsa246z5vnjvrol6xk5tpj4zys42tcaotxq7tp7ptgraalrya';
 
-// Função auxiliar para gerar QR Code (mantida)
-async function createQrCodeImage(registrationId) {
+/**
+ * Gera a imagem de um QR Code como uma string Data URL.
+ * @param {string} dataForQr - O dado a ser codificado no QR Code (agora o registrationId).
+ * @returns {Promise<string>} A imagem do QR Code como Data URL (base64).
+ */
+async function createQrCodeImage(dataForQr) {
     try {
-        console.log(` -> Gerando QR Code para: ${registrationId}`);
-        const qrCodeDataUrl = await QRCode.toDataURL(registrationId, {
+        console.log(` -> Gerando QR Code para: ${dataForQr}`);
+        const qrCodeDataUrl = await QRCode.toDataURL(dataForQr, {
             width: 150,
             margin: 1,
             color: { dark: '#000000', light: '#FFFFFF' }
@@ -28,43 +31,25 @@ async function createQrCodeImage(registrationId) {
     }
 }
 
-// Função auxiliar de formatação de endereço (mantida)
-const formatFullAddress = (location) => {
-    if (!location || typeof location !== 'object') {
-        return "Local a definir";
-    }
-    try {
-        if (location.type !== 'Physical' || !location.address) {
-            return "Local a definir";
-        }
-        const { venueName, address } = location;
-        const line1 = `${address.street || ''}${address.number ? `, ${address.number}` : ''}`.trim();
-        const line2 = `${address.neighborhood ? `${address.neighborhood}, ` : ''}${address.city || ''}${address.state ? ` - ${address.state}` : ''}`.trim();
-        return `${venueName || 'Local'}\n${line1}\n${line2}`.trim();
-    } catch (error) {
-        console.error("Error formatting address:", error);
-        return "Local a definir";
-    }
-};
-
-// Função de geração de PDF (atualizada para receber novos dados)
+/**
+ * Gera o buffer de um PDF para o ingresso.
+ * @param {object} ticketData - Os dados completos do ingresso, incluindo registrationId.
+ * @returns {Promise<Buffer>} O buffer do PDF gerado.
+ */
 async function generateTicketPDF(ticketData) {
     try {
-        console.log(' -> Gerando QR Code para o novo PDF...');
+        // ✨ ATUALIZAÇÃO PRINCIPAL AQUI ✨
+        // Agora usamos o 'registrationId' para gerar o QR Code.
+        console.log(` -> Gerando QR Code para o PDF com o ID: ${ticketData.registrationId}`);
         const qrCodeImage = await createQrCodeImage(ticketData.registrationId);
 
         console.log(' -> Renderizando componente PDF para buffer...');
         
         const pdfBuffer = await renderToBuffer(
             <TicketPDF
-                ticketData={ticketData}
+                ticketData={ticketData} // ticketData já contém o registrationId
                 qrCodeImage={qrCodeImage}
-                brandLogoImage={BRAND_LOGO_BASE64}
-                // ✨ NOVAS PROPS ADICIONADAS ✨
-                eventImage={ticketData.eventImage}
-                organizerName={ticketData.organizerName}
-                organizerLogo={ticketData.organizerLogo}
-                eventDescription={ticketData.eventDescription}
+                brandLogoImage={BRAND_LOGO_URL}
             />
         );
 
@@ -77,10 +62,14 @@ async function generateTicketPDF(ticketData) {
     }
 }
 
-// FUNÇÃO PRINCIPAL COMPLETAMENTE ATUALIZADA
+/**
+ * Envia o e-mail com o ingresso em PDF anexado.
+ * @param {object} userData - Dados do usuário (nome, email).
+ * @param {object} ticketData - Dados completos do ingresso e do evento.
+ */
 export async function sendTicketEmail(userData, ticketData) {
     const { name: userName, email: userEmail } = userData;
-    const { eventName, eventImage, organizerName, organizerLogo, eventDescription } = ticketData;
+    const { eventName } = ticketData;
 
     if (!userEmail) {
         console.warn("❌ Usuário sem e-mail cadastrado. Pulando envio de ingresso.");
@@ -93,29 +82,25 @@ export async function sendTicketEmail(userData, ticketData) {
         if (!process.env.RESEND_API_KEY) {
             throw new Error("RESEND_API_KEY está faltando");
         }
-        console.log("✅ Variáveis de ambiente verificadas");
 
-        // 1. Gerar PDF (agora com dados completos)
+        // 1. Gerar PDF (agora com o QR Code correto)
         console.log(`📄 Gerando PDF para o evento: ${eventName}`);
         const pdfBuffer = await generateTicketPDF(ticketData);
 
-        // 2. Renderizar template de e-mail (ATUALIZADO COM NOVOS DADOS)
+        // 2. Renderizar template de e-mail HTML
         console.log("🎨 Renderizando template de e-mail...");
         const emailHtml = await render(
             <TicketEmail 
                 userName={userName}
                 eventName={eventName}
                 eventDate={ticketData.eventDate}
-                eventLocation={formatFullAddress(ticketData.eventLocation).replace(/\n/g, ', ')}
-                // ✨ NOVAS PROPS ADICIONADAS ✨
-                eventImage={eventImage}
-                organizerName={organizerName}
-                organizerLogo={organizerLogo}
-                eventDescription={eventDescription}
+                eventLocation={ticketData.eventLocation?.address ? `${ticketData.eventLocation.venueName}, ${ticketData.eventLocation.address.city}` : 'Online'}
+                eventImage={ticketData.eventImage}
+                organizerName={ticketData.organizerName}
             />
         );
 
-        // 3. Enviar e-mail
+        // 3. Enviar e-mail com o PDF anexado
         console.log(`🚀 Enviando e-mail para: ${userEmail}`);
         
         const fromAddress = 'Ticketfy <onboarding@resend.dev>';
@@ -140,9 +125,8 @@ export async function sendTicketEmail(userData, ticketData) {
         return { data, error };
 
     } catch (error) {
-        console.error("❌ Erro detalhado no envio do e-mail:", {
+        console.error("❌ Erro detalhado no processo de envio do e-mail:", {
             message: error.message,
-            stack: error.stack,
             userEmail,
             eventName
         });

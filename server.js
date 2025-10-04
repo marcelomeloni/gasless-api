@@ -84,64 +84,44 @@ const upsertUserInSupabase = async (userData) => {
 // Função auxiliar para interagir com o Supabase
 // Função auxiliar para interagir com o Supabase (VERSÃO CORRIGIDA E MAIS ROBUSTA)
 async function saveRegistrationData({ eventAddress, wallet_address, name, phone, email, company, sector, role }) {
-    let profile_id;
-
-    // Passo 1: Tenta encontrar um perfil existente com a mesma carteira
-    console.log(` -> Procurando perfil para a carteira: ${wallet_address}`);
-    const { data: existingProfile, error: findError } = await supabase
+    
+    // Passo 1: Use 'upsert' com 'onConflict' para criar ou atualizar o perfil.
+    // Isso garante que existirá apenas UM perfil por 'wallet_address'.
+    console.log(` -> Garantindo perfil para a carteira: ${wallet_address}`);
+    const { data: profileData, error: profileError } = await supabase
         .from('profiles')
+        .upsert(
+            { 
+                wallet_address: wallet_address, 
+                name: name,     // Atualiza o nome principal
+                email: email,   // Atualiza o e-mail principal
+                updated_at: new Date()
+            },
+            {
+                // ✨ A MÁGICA ACONTECE AQUI ✨
+                // Se uma linha com esta 'wallet_address' já existir, ATUALIZE-A em vez de criar uma nova.
+                onConflict: 'wallet_address'
+            }
+        )
         .select('id')
-        .eq('wallet_address', wallet_address)
-        .single();
+        .single(); // .single() é importante para retornar um único objeto
 
-    if (findError && findError.code !== 'PGRST116') {
-        // PGRST116 é o erro "nenhuma linha encontrada", que é esperado e não um problema.
-        // Qualquer outro erro deve ser reportado.
-        console.error("Erro ao buscar perfil:", findError);
-        throw new Error("Falha ao verificar perfil existente.");
+    if (profileError) {
+        console.error("Erro ao fazer upsert no perfil:", profileError);
+        throw new Error("Falha ao salvar dados do perfil.");
     }
 
-    if (existingProfile) {
-        // --- Perfil JÁ EXISTE ---
-        console.log(` -> Perfil encontrado. ID: ${existingProfile.id}`);
-        profile_id = existingProfile.id;
-        
-        // Opcional: Atualizar os dados principais do perfil (nome/email) se desejar.
-        // Descomente o bloco abaixo se quiser que cada nova inscrição atualize o perfil principal.
-        /*
-        const { error: updateError } = await supabase
-            .from('profiles')
-            .update({ name: name, email: email, updated_at: new Date() })
-            .eq('id', profile_id);
-
-        if (updateError) {
-            console.warn(" -> Aviso: Falha ao atualizar o perfil existente.", updateError.message);
-        }
-        */
-
-    } else {
-        // --- Perfil NÃO EXISTE ---
-        console.log(" -> Nenhum perfil encontrado. Criando um novo...");
-        const { data: newProfile, error: createError } = await supabase
-            .from('profiles')
-            .insert({
-                wallet_address: wallet_address,
-                name: name,
-                email: email
-            })
-            .select('id')
-            .single();
-
-        if (createError) {
-            console.error("Erro ao criar novo perfil:", createError);
-            throw new Error("Falha ao criar novo perfil de usuário.");
-        }
-        
-        profile_id = newProfile.id;
-        console.log(` -> Novo perfil criado. ID: ${profile_id}`);
+    if (!profileData) {
+        // Isso pode acontecer se o upsert não retornar dados, o que seria um erro inesperado.
+        throw new Error("Não foi possível obter o ID do perfil após o upsert.");
     }
 
-    // Passo 2: Crie um NOVO registro na tabela 'registrations'
+    const profile_id = profileData.id;
+    console.log(` -> Perfil garantido. ID: ${profile_id}`);
+
+
+    // Passo 2: Crie um NOVO registro na tabela 'registrations'.
+    // Esta parte já estava correta, pois sempre queremos um novo registro para cada ingresso.
     const registrationDetails = { name, phone, email, company, sector, role };
     console.log(` -> Criando novo registro para o evento: ${eventAddress}`);
 
@@ -806,6 +786,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

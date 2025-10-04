@@ -305,7 +305,7 @@ const styles = StyleSheet.create({
 
 export const TicketPDF = ({ ticketData, qrCodeImage, brandLogoImage }) => {
   // A `eventImage` agora é uma string Base64 (Data URI) passada pelo TicketSuccessModal
-  const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey, eventImage } = ticketData;
+  const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey, eventImage, registrationId  } = ticketData;
 
   const formatFullAddress = (location) => {
     if (!location || location.type !== 'Physical' || !location.address) { 
@@ -340,79 +340,42 @@ export const TicketPDF = ({ ticketData, qrCodeImage, brandLogoImage }) => {
     <Document style={styles.document} author="Ticketfy" title={`Ingresso - ${eventName}`}>
       {/* PÁGINA 1: INGRESSO PRINCIPAL */}
       <Page size="A5" style={styles.page}>
-        <View style={styles.header}>
-          <View style={styles.brandContainer}>
-            <View style={styles.brandSection}>
-              <Image 
-                style={styles.brandLogo} 
-                src={brandLogoImage} 
-              />
-              <Text style={styles.brandTitle}>TICKETFY</Text>
-            </View>
-            <Text style={styles.ticketType}>Ingresso Digital NFT</Text>
-            <Text style={styles.eventName}>{eventName}</Text>
-          </View>
-
-          <View style={styles.eventImageContainer}>
-            {eventImage && (
-              <Image 
-                style={styles.eventImage} 
-                // ✅ Esta sintaxe funciona perfeitamente para Base64 Data URIs
-                src={eventImage} 
-              />
-            )}
-          </View>
-        </View>
-
-        {/* Corpo do ingresso */}
-        <View style={styles.ticketBody}>
-          <View style={styles.infoGrid}>
-            <View style={styles.infoColumn}>
-              <View style={styles.infoBlock}>
-                <Text style={styles.infoLabel}>Data do Evento</Text>
-                <Text style={styles.infoValue}>{formatDisplayDate(eventDate)}</Text>
-              </View>
-              <View style={styles.infoBlock}>
-                <Text style={styles.infoLabel}>Localização</Text>
-                <Text style={styles.infoValue}>{formatFullAddress(eventLocation)}</Text>
-              </View>
-            </View>
-            <View style={styles.infoColumn}>
-              <View style={styles.infoBlock}>
-                <Text style={styles.infoLabel}>Horário</Text>
-                <Text style={styles.infoValue}>{formatDisplayTime(eventDate)}</Text>
-                <Text style={[styles.infoValue, { fontSize: 8, color: '#64748B' }]}>
-                  (Horário de Brasília)
-                </Text>
-              </View>
-            </View>
-          </View>
-          
-          <View style={styles.qrSection}>
-            <Text style={styles.qrLabel}>Código de Validação</Text>
-            {qrCodeImage && <Image style={styles.qrCodeImage} src={qrCodeImage} />}
-            <Text style={styles.mintAddress}>
-              {mintAddress}
-            </Text>
-          </View>
-
-          <View style={styles.footer}>
-            <Text style={styles.securityNotice}>
-              Este ingresso é um token NFT único na blockchain Solana. 
-              Apresente este QR code na entrada do evento.
-            </Text>
-            <Text style={styles.securityNotice}>
-              Após o evento, seu certificado de participação estará disponível em:
-            </Text>
-            <Link 
-              src={`https://ticketfy.app/certificate/${mintAddress}`} 
-              style={styles.certificateLink}
-            >
-              ticketfy.app/certificate/{mintAddress?.slice(0, 8)}...
-            </Link>
-          </View>
-        </View>
-      </Page>
+                <View style={styles.header}>
+                    <View style={styles.brandContainer}>
+                        <View style={styles.brandSection}><Image style={styles.brandLogo} src={brandLogoImage} /><Text style={styles.brandTitle}>TICKETFY</Text></View>
+                        <Text style={styles.ticketType}>Ingresso Digital NFT</Text>
+                        <Text style={styles.eventName}>{eventName}</Text>
+                    </View>
+                    <View style={styles.eventImageContainer}>{eventImage && (<Image style={styles.eventImage} src={eventImage} />)}</View>
+                </View>
+                <View style={styles.ticketBody}>
+                    <View style={styles.infoGrid}>
+                        <View style={styles.infoColumn}>
+                            <View style={styles.infoBlock}><Text style={styles.infoLabel}>Data do Evento</Text><Text style={styles.infoValue}>{formatDisplayDate(eventDate)}</Text></View>
+                            <View style={styles.infoBlock}><Text style={styles.infoLabel}>Localização</Text><Text style={styles.infoValue}>{formatFullAddress(eventLocation)}</Text></View>
+                        </View>
+                        <View style={styles.infoColumn}>
+                            <View style={styles.infoBlock}><Text style={styles.infoLabel}>Horário</Text><Text style={styles.infoValue}>{formatDisplayTime(eventDate)}</Text><Text style={[styles.infoValue, { fontSize: 8, color: '#64748B' }]}>(Horário de Brasília)</Text></View>
+                        </View>
+                    </View>
+                    <View style={styles.qrSection}>
+                        <Text style={styles.qrLabel}>Código de Validação</Text>
+                        {qrCodeImage && <Image style={styles.qrCodeImage} src={qrCodeImage} />}
+                        
+                        {/* ✨ ATUALIZAÇÃO PRINCIPAL AQUI ✨ */}
+                        {/* Agora exibimos o 'registrationId' como o código de verificação. */}
+                        {/* O fallback para 'mintAddress' é uma segurança extra. */}
+                        <Text style={styles.mintAddress}>
+                            {registrationId || mintAddress}
+                        </Text>
+                    </View>
+                    <View style={styles.footer}>
+                        <Text style={styles.securityNotice}>Este ingresso é um token NFT único na blockchain Solana. Apresente este QR code na entrada do evento.</Text>
+                        <Text style={styles.securityNotice}>Após o evento, seu certificado de participação estará disponível em:</Text>
+                        <Link src={`https://ticketfy.app/certificate/${mintAddress}`} style={styles.certificateLink}>ticketfy.app/certificate/{mintAddress?.slice(0, 8)}...</Link>
+                    </View>
+                </View>
+            </Page>
 
       {/* PÁGINA 2: INFORMAÇÕES DE SEGURANÇA */}
       {seedPhrase && privateKey && (

@@ -283,14 +283,10 @@ app.post('/api/generate-payment-qr', async (req, res) => {
         const description = `Ingresso: ${eventName} - ${tierName}`;
         const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
 
-        // Obter URLs base com fallbacks robustos
+        // Obter URLs base
         const API_URL = process.env.API_URL || 'https://gasless-api-ke68.onrender.com';
         const FRONTEND_URL = process.env.FRONTEND_URL || 'https://seu-frontend.onrender.com';
 
-        console.log('API_URL:', API_URL);
-        console.log('FRONTEND_URL:', FRONTEND_URL);
-
-        // Garantir que as URLs sejam válidas
         const cleanApiUrl = API_URL.replace(/\/$/, '');
         const cleanFrontendUrl = FRONTEND_URL.replace(/\/$/, '');
 
@@ -328,16 +324,28 @@ app.post('/api/generate-payment-qr', async (req, res) => {
                 failure: `${cleanFrontendUrl}/payment/failure`, 
                 pending: `${cleanFrontendUrl}/payment/pending`
             },
-            // ⚠️ REMOVER auto_return ou garantir URLs válidas
-            // auto_return: 'approved',
         };
 
         console.log('Preference data:', JSON.stringify(preferenceData, null, 2));
 
-        // CORREÇÃO: Use um nome diferente para a instância
         const preferenceClient = new Preference(client);
         const response = await preferenceClient.create({ body: preferenceData });
         
+        // ✅ CORREÇÃO: Verificar a estrutura real da resposta do Mercado Pago
+        console.log('Mercado Pago response:', JSON.stringify(response, null, 2));
+
+        // Extrair dados do QR code da resposta
+        const qrCode = response.point_of_interaction?.transaction_data?.qr_code;
+        const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
+        
+        // ✅ VALIDAÇÃO: Garantir que temos os dados do QR code
+        if (!qrCode || !qrCodeBase64) {
+            console.warn('QR code data not found in Mercado Pago response:', {
+                point_of_interaction: response.point_of_interaction,
+                transaction_data: response.point_of_interaction?.transaction_data
+            });
+        }
+
         // Store payment session
         activePaymentSessions.set(externalReference, {
             eventAddress,
@@ -364,15 +372,25 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             }
         }, 15 * 60 * 1000);
 
+        // ✅ CORREÇÃO: Garantir que a resposta tenha a estrutura esperada
         res.status(200).json({
             success: true,
-            qrCode: response.point_of_interaction?.transaction_data?.qr_code,
-            qrCodeBase64: response.point_of_interaction?.transaction_data?.qr_code_base64,
+            qrCode: qrCode,
+            qrCodeBase64: qrCodeBase64,
             externalReference: externalReference,
             ticketUrl: response.init_point,
             preferenceId: response.id,
             expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            amount: amount
+            amount: amount,
+            // ✅ DEBUG: Incluir dados de debug em desenvolvimento
+            debug: process.env.NODE_ENV === 'development' ? {
+                hasQrCode: !!qrCode,
+                hasQrCodeBase64: !!qrCodeBase64,
+                responseStructure: {
+                    point_of_interaction: !!response.point_of_interaction,
+                    transaction_data: !!response.point_of_interaction?.transaction_data
+                }
+            } : undefined
         });
 
     } catch (error) {
@@ -1477,5 +1495,6 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 

@@ -17,12 +17,16 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { sendTicketEmail } from './services/emailService.jsx';
+
+// --- MERCADO PAGO IMPORT ---
+import mercadopago from 'mercadopago';
+
 // --- INITIAL SETUP ---
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const idl = JSON.parse(fs.readFileSync(path.resolve(__dirname, './ticketing_system.json'), 'utf8'));
-const web3 = require('@solana/web3.js');
+
 // --- ENVIRONMENT VARIABLES & CONSTANTS ---
 const app = express();
 app.use(cors());
@@ -34,19 +38,31 @@ const PAYER_MNEMONIC = process.env.PAYER_MNEMONIC;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PINATA_JWT = process.env.PINATA_JWT;
+const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
+
 const upload = multer({ storage: multer.memoryStorage() });
+
 if (!SOLANA_RPC_URL || !PAYER_MNEMONIC || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
     throw new Error("Required environment variables are missing (Solana or Supabase).");
 }
 if (!PINATA_JWT) {
     throw new Error("A variável de ambiente PINATA_JWT é obrigatória.");
 }
+if (!MERCADOPAGO_ACCESS_TOKEN) {
+    throw new Error("A variável de ambiente MERCADOPAGO_ACCESS_TOKEN é obrigatória.");
+}
+
+// Configure Mercado Pago
+mercadopago.configure({
+    access_token: MERCADOPAGO_ACCESS_TOKEN,
+    sandbox: process.env.NODE_ENV !== 'production',
+});
+
 const PROGRAM_ID = new PublicKey("5kQZsq3z1P9TQuR2tBXJjhKr46JnEcsDKYDnEfNCB792");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 // --- SUPABASE CLIENT SETUP ---
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-
 
 // --- SOLANA CONNECTION SETUP ---
 const getKeypairFromMnemonic = (mnemonic) => {
@@ -63,15 +79,11 @@ const program = new Program(idl, PROGRAM_ID, provider);
 console.log(`[+] API configured with program: ${PROGRAM_ID.toString()}`);
 console.log(`[+] Payer wallet: ${payerKeypair.publicKey.toString()}`);
 console.log(`[+] Supabase client initialized.`);
-if (!MERCADOPAGO_ACCESS_TOKEN) {
-    throw new Error("A variável de ambiente MERCADOPAGO_ACCESS_TOKEN é obrigatória.");
-}
-const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
-// Configure Mercado Pago
-mercadopago.configure({
-    access_token: MERCADOPAGO_ACCESS_TOKEN,
-    sandbox: process.env.NODE_ENV !== 'production', // Use sandbox for testing
-});
+console.log(`[+] Mercado Pago configured.`);
+
+// --- PAYMENT SESSIONS STORAGE ---
+const activePaymentSessions = new Map();
+
 // --- SUPABASE HELPER FUNCTION ---
 const upsertUserInSupabase = async (userData) => {
     const { name, phone, email, company, sector, role, wallet_address } = userData;
@@ -97,7 +109,6 @@ const upsertUserInSupabase = async (userData) => {
 
 async function saveRegistrationData({ eventAddress, wallet_address, name, phone, email, company, sector, role, mint_address }) {
     
-    // Passo 1: Use 'upsert' com 'onConflict' para criar ou atualizar o perfil do comprador.
     console.log(` -> Garantindo perfil para a carteira: ${wallet_address}`);
     const { data: profileData, error: profileError } = await supabase
         .from('profiles')
@@ -114,7 +125,6 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
 
     if (profileError) {
         console.error("Erro ao fazer upsert no perfil:", profileError);
-        // Lida com o erro de email duplicado de forma mais clara
         if (profileError.message.includes('profiles_email_key')) {
             throw new Error('Este email já está em uso por outra conta.');
         }
@@ -128,7 +138,6 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
     const profile_id = profileData.id;
     console.log(` -> Perfil garantido. ID: ${profile_id}`);
 
-    // Passo 2: Crie um NOVO registro na tabela 'registrations', agora incluindo o mint_address.
     const registrationDetails = { name, phone, email, company, sector, role };
     console.log(` -> Criando novo registro para o evento ${eventAddress} com o mint ${mint_address}`);
 
@@ -150,7 +159,6 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
 
     console.log(`[💾] Dados de registro salvos com sucesso! ID do Registro: ${newRegistration.id}`);
     
-    // Passo 3: Retorne o ID do registro para ser usado no QR Code.
     return newRegistration.id;
 }
 // ====================================================================
@@ -254,9 +262,8 @@ async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, 
         console.error("[✘] Error during paid ticket processing:", error);
         throw error;
     }
-}/**
- * Generate QR code for Mercado Pago payment
- */
+}
+
 app.post('/api/generate-payment-qr', async (req, res) => {
     const {
         eventAddress,
@@ -302,7 +309,7 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             notification_url: `${process.env.API_URL || 'http://localhost:3001'}/webhooks/mercadopago`,
             expires: true,
             expiration_date_from: new Date().toISOString(),
-            expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(), // 15 minutes
+            expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
             back_urls: {
                 success: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/success`,
                 failure: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/failure`,
@@ -359,7 +366,6 @@ app.post('/api/generate-payment-qr', async (req, res) => {
         });
     }
 });
-
 /**
  * Check payment status
  */
@@ -469,7 +475,6 @@ app.post('/api/process-paid-ticket', async (req, res) => {
         const { eventAddress, tierIndex, formData, userEmail, userName } = paymentSession;
         
         // Call your existing minting logic here
-        // For new users (without wallet)
         const mintResponse = await processPaidTicketForNewUser({
             eventAddress,
             tierIndex,
@@ -523,9 +528,6 @@ app.post('/webhooks/mercadopago', async (req, res) => {
                     paymentSession.status = 'paid';
                     paymentSession.paymentId = paymentId;
                     activePaymentSessions.set(externalReference, paymentSession);
-                    
-                    // Here you could trigger automatic ticket processing
-                    // or wait for frontend to call /api/process-paid-ticket
                 }
             }
         }
@@ -1330,6 +1332,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

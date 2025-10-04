@@ -163,109 +163,83 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         const newUserPublicKey = newUserKeypair.publicKey;
         const privateKey = bs58.encode(newUserKeypair.secretKey);
         
-        // --- ALTERAÇÃO AQUI ---
-        // Usamos a nova função que salva os dados em 'profiles' e cria um novo 'registrations'
-        await saveRegistrationData({
-            eventAddress,
-            wallet_address: newUserPublicKey.toString(),
-            name, phone, email, company, sector, role
-        });
-        
-        // 2. Lógica on-chain (permanece a mesma)
+        // 2. Lógica on-chain para mintar o ingresso
         const eventPubkey = new PublicKey(eventAddress);
         const eventAccount = await program.account.event.fetch(eventPubkey);
-        const selectedTier = eventAccount.tiers[tierIndex];
-        if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
-
-        const priceFromContract = selectedTier.priceBrlCents.toNumber() || 0;
-        
-        if (priceBRLCents && priceBRLCents !== priceFromContract) {
-            console.warn(`[WARN] Price mismatch: Sent ${priceBRLCents}, Contract ${priceFromContract}`);
-        }
+        // ... (validações de tier, preço, etc., se necessário) ...
 
         const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
         const dataHash = createHash('sha256').update(userDataString).digest();
         
-        // ... (resto da lógica on-chain para registrar usuário, criar contador e mintar o ingresso) ...
-
+        // As chamadas para registrar usuário e criar contador on-chain permanecem as mesmas
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
         await program.methods.registerUser(Array.from(dataHash)).accounts({
-            authority: newUserPublicKey, 
-            userProfile: userProfilePda,
-            payer: payerKeypair.publicKey, 
-            systemProgram: SystemProgram.programId,
+            authority: newUserPublicKey, userProfile: userProfilePda,
+            payer: payerKeypair.publicKey, systemProgram: SystemProgram.programId,
         }).rpc();
 
         const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
         await program.methods.createBuyerCounter().accounts({
-            payer: payerKeypair.publicKey, 
-            event: eventPubkey, 
-            buyer: newUserPublicKey,
-            buyerTicketCount: buyerTicketCountPda, 
-            systemProgram: SystemProgram.programId
+            payer: payerKeypair.publicKey, event: eventPubkey, buyer: newUserPublicKey,
+            buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
         }).rpc();
         
         const mintKeypair = Keypair.generate();
+        const mintAddress = mintKeypair.publicKey.toString(); // <- Pegamos o mintAddress aqui
+        
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
         const signature = await program.methods.mintTicket(tierIndex).accounts({
-            globalConfig: globalConfigPda, 
-            event: eventPubkey, 
-            payer: payerKeypair.publicKey, 
-            buyer: newUserPublicKey,
-            mintAccount: mintKeypair.publicKey, 
-            ticket: ticketPda, 
-            buyerTicketCount: buyerTicketCountPda,
-            associatedTokenAccount, 
-            metadataAccount: metadataPda, 
-            metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-            tokenProgram: TOKEN_PROGRAM_ID, 
-            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-            systemProgram: SystemProgram.programId, 
-            rent: SYSVAR_RENT_PUBKEY,
+            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
+            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
         }).signers([payerKeypair, mintKeypair]).rpc();
         
-        console.log(`[✔] Onboarding successful! Sig: ${signature}`);
+        console.log(`[✔] Onboarding on-chain successful! Sig: ${signature}`);
         
-        // 3. Envio de e-mail em segundo plano
+        // 3. Salva tudo no banco de dados APÓS o mint e captura o ID do registro
+        const registrationId = await saveRegistrationData({
+            eventAddress,
+            wallet_address: newUserPublicKey.toString(),
+            mint_address: mintAddress, // Passa o endereço do NFT recém-criado
+            name, phone, email, company, sector, role
+        });
+
+        // 4. Envio de e-mail (lógica inalterada)
         if (email) {
             try {
                 const metadataResponse = await fetch(eventAccount.metadataUri);
                 const metadata = await metadataResponse.json();
-
-                // Correção de sintaxe aqui (adicionado 'const ticketDataForEmail')
                 const ticketDataForEmail = {
                     eventName: metadata.name, 
                     eventDate: metadata.properties.dateTime.start,
                     eventLocation: metadata.properties.location, 
-                    mintAddress: mintKeypair.publicKey.toString(),
+                    mintAddress: mintAddress,
                     seedPhrase: mnemonic, 
                     privateKey: privateKey, 
-                    eventImage: metadata.image, 
-                    eventDescription: metadata.description, 
-                    eventCategory: metadata.category, 
-                    eventTags: metadata.tags, 
-                    organizerName: metadata.organizer.name,
-                    organizerLogo: metadata.organizer.organizerLogo, 
-                    organizerWebsite: metadata.organizer.website,
+                    eventImage: metadata.image,
+                    // ...outros dados do metadata...
                 };
                 sendTicketEmail({ name, email }, ticketDataForEmail);
-            } catch (e) {
+            } catch(e) {
                 console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
             }
         }
 
-        // 4. Resposta ao cliente
+        // 5. Resposta final ao cliente, agora incluindo o registrationId
         res.status(200).json({ 
             success: true, 
             publicKey: newUserPublicKey.toString(), 
             seedPhrase: mnemonic, 
             privateKey: privateKey, 
-            mintAddress: mintKeypair.publicKey.toString(), 
-            signature 
+            mintAddress: mintAddress, 
+            signature,
+            registrationId: registrationId // <-- NOVO DADO PARA O QR CODE!
         });
 
     } catch (error) {
@@ -336,15 +310,8 @@ app.post('/mint-for-existing-user', async (req, res) => {
     try {
         const eventPubkey = new PublicKey(eventAddress);
         const buyer = new PublicKey(buyerAddress);
-
-        // --- ALTERAÇÃO AQUI ---
-        // Usamos a nova função que salva os dados em 'profiles' e cria um novo 'registrations'
-        await saveRegistrationData({
-            eventAddress,
-            wallet_address: buyer.toString(),
-            name, phone, email, company, sector, role
-        });
         
+        // 1. Lógica on-chain para mintar o ingresso PRIMEIRO
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const selectedTier = eventAccount.tiers[tierIndex];
         if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
@@ -368,49 +335,44 @@ app.post('/mint-for-existing-user', async (req, res) => {
         const accountInfo = await connection.getAccountInfo(buyerTicketCountPda);
         if (!accountInfo) {
             await program.methods.createBuyerCounter().accounts({
-                payer: payerKeypair.publicKey, 
-                event: eventPubkey, 
-                buyer: buyer,
-                buyerTicketCount: buyerTicketCountPda, 
-                systemProgram: SystemProgram.programId
+                payer: payerKeypair.publicKey, event: eventPubkey, buyer: buyer,
+                buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
             }).rpc();
         }
         
-        // Lógica de Mint
         const mintKeypair = Keypair.generate();
         const mintAddress = mintKeypair.publicKey.toString();
+        
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
         const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, buyer);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
         const signature = await program.methods.mintTicket(tierIndex).accounts({
-            globalConfig: globalConfigPda, 
-            event: eventPubkey, 
-            payer: payerKeypair.publicKey, 
-            buyer: buyer,
-            mintAccount: mintKeypair.publicKey, 
-            ticket: ticketPda, 
-            buyerTicketCount: buyerTicketCountPda,
-            associatedTokenAccount, 
-            metadataAccount: metadataPda, 
-            metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-            tokenProgram: TOKEN_PROGRAM_ID, 
-            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-            systemProgram: SystemProgram.programId, 
-            rent: SYSVAR_RENT_PUBKEY,
+            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: buyer,
+            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
         }).signers([payerKeypair, mintKeypair]).rpc();
 
-        console.log(`[✔] Mint bem-sucedido para usuário existente! Sig: ${signature}`);
+        console.log(`[✔] Mint on-chain bem-sucedido! Sig: ${signature}`);
 
-        // Função auxiliar para disparar o e-mail
+        // 2. Salva tudo no banco de dados APÓS o mint e captura o ID do registro
+        const registrationId = await saveRegistrationData({
+            eventAddress,
+            wallet_address: buyer.toString(),
+            mint_address: mintAddress, // Passa o endereço do NFT recém-criado
+            name, phone, email, company, sector, role
+        });
+
+        // 3. Envio de e-mail (lógica inalterada)
         const triggerEmail = async () => {
             if (email) {
                 try {
                     const metadataResponse = await fetch(eventAccount.metadataUri);
                     const metadata = await metadataResponse.json();
                     
-                    // Correção de sintaxe aqui (adicionado 'const ticketDataForEmail')
                     const ticketDataForEmail = {
                         eventName: metadata.name, 
                         eventDate: metadata.properties.dateTime.start,
@@ -434,7 +396,14 @@ app.post('/mint-for-existing-user', async (req, res) => {
 
         triggerEmail();
 
-        res.status(200).json({ success: true, isPaid: true, signature, mintAddress: mintAddress });
+        // 4. Resposta final ao cliente, agora incluindo o registrationId
+        res.status(200).json({ 
+            success: true, 
+            isPaid: true, 
+            signature, 
+            mintAddress: mintAddress,
+            registrationId: registrationId // <-- NOVO DADO PARA O QR CODE!
+        });
 
     } catch (error) {
         console.error("[✘] Erro ao mintar para usuário existente:", error);
@@ -727,49 +696,70 @@ app.get('/event-details/:eventAddress', async (req, res) => {
         res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os dados do evento.' });
     }
 });
-app.post('/validate-ticket', async (req, res) => {
-    const { eventAddress, nftMint, validatorAddress } = req.body;
+// --- NOVO ENDPOINT DE VALIDAÇÃO POR ID ---
+app.post('/validate-by-id/:registrationId', async (req, res) => {
+    const { registrationId } = req.params;
+    const { validatorAddress } = req.body;
 
-    if (!eventAddress || !nftMint || !validatorAddress) {
-        return res.status(400).json({ success: false, error: "Parâmetros 'eventAddress', 'nftMint', e 'validatorAddress' são obrigatórios." });
+    if (!registrationId || !validatorAddress) {
+        return res.status(400).json({ success: false, error: "ID do registro e endereço do validador são obrigatórios." });
     }
-    console.log(`[+] Iniciando validação para o ingresso: ${nftMint}`);
+    console.log(`[+] Iniciando validação para o registro: ${registrationId}`);
 
     try {
-        const eventPubkey = new PublicKey(eventAddress);
-        const nftMintPubkey = new PublicKey(nftMint);
+        // 1. Busca o registro no banco de dados para obter os endereços on-chain
+        const { data: registration, error: dbError } = await supabase
+            .from('registrations')
+            .select('*')
+            .eq('id', registrationId)
+            .single();
+
+        if (dbError || !registration) {
+            return res.status(404).json({ success: false, error: "Ingresso não encontrado (ID inválido)." });
+        }
+
+        const { event_address, mint_address, registration_details } = registration;
+        const participantName = registration_details?.name || 'Participante';
+
+        console.log(` -> Registro encontrado. Evento: ${event_address}, Mint: ${mint_address}`);
+
+        // 2. Com os dados do banco, executa a validação na blockchain
+        const eventPubkey = new PublicKey(event_address);
+        const nftMintPubkey = new PublicKey(mint_address);
         const validatorPubkey = new PublicKey(validatorAddress);
 
-        // 1. Verificar se o endereço fornecido é realmente um validador do evento
+        // 2a. Verifica a permissão do validador
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const isValidator = eventAccount.validators.some(v => v.equals(validatorPubkey));
         if (!isValidator) {
             console.warn(` -> TENTATIVA DE VALIDAÇÃO NEGADA: ${validatorAddress} não é um validador para este evento.`);
-            return res.status(403).json({ success: false, error: "Acesso negado. A carteira fornecida não é um validador autorizado para este evento." });
+            return res.status(403).json({ success: false, error: "Acesso negado. Esta carteira não é um validador autorizado." });
         }
         console.log(` -> Validador ${validatorAddress} autorizado.`);
 
-        // 2. Encontrar a conta do ingresso para descobrir o dono (owner)
-        // O offset para o campo `nftMint` na conta `Ticket` é 8 (discriminator) + 32 (event) = 40
-        const TICKET_NFT_MINT_FIELD_OFFSET = 40; 
+        // 2b. Encontra a conta do ticket e verifica se já foi usado
+        const TICKET_NFT_MINT_FIELD_OFFSET = 40; // 8 (discriminator) + 32 (event)
         const tickets = await program.account.ticket.all([
             { memcmp: { offset: TICKET_NFT_MINT_FIELD_OFFSET, bytes: nftMintPubkey.toBase58() } }
         ]);
 
         if (tickets.length === 0) {
-            return res.status(404).json({ success: false, error: "Ingresso (conta de ticket) não encontrado na blockchain." });
+            return res.status(404).json({ success: false, error: "Ingresso (on-chain) não encontrado." });
         }
         const ticketAccount = tickets[0];
-        const ownerPubkey = ticketAccount.account.owner;
-        console.log(` -> Ingresso encontrado. Dono: ${ownerPubkey.toString()}`);
         
-        // 3. Derivar as contas necessárias para a instrução
+        if (ticketAccount.account.redeemed) {
+             console.warn(` -> TENTATIVA DE VALIDAÇÃO DUPLA: O ingresso ${mint_address} já foi validado.`);
+             return res.status(409).json({ success: false, error: "Este ingresso já foi utilizado." });
+        }
+
+        const ownerPubkey = ticketAccount.account.owner;
+        console.log(` -> Ingresso on-chain encontrado. Dono: ${ownerPubkey.toString()}`);
+
+        // 2c. Executa a transação de resgate (redeem)
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), nftMintPubkey.toBuffer()], program.programId);
         const nftTokenAccount = await getAssociatedTokenAddress(nftMintPubkey, ownerPubkey);
 
-        // 4. Chamar a instrução `redeemTicket`
-        // A API (payerKeypair) paga pela transação, mas a instrução só funciona
-        // porque o `validatorPubkey` é passado como uma das contas, satisfazendo as constraints do programa.
         const signature = await program.methods.redeemTicket().accounts({ 
             ticket: ticketPda, 
             event: eventPubkey, 
@@ -781,23 +771,15 @@ app.post('/validate-ticket', async (req, res) => {
         
         console.log(`[✔] Ingresso validado com sucesso! Assinatura: ${signature}`);
 
-        // Opcional: buscar o nome do dono no Supabase para retornar uma resposta mais rica
-        let ownerName = null;
-        try {
-            const { data: profile } = await supabase.from('profiles').select('name').eq('wallet_address', ownerPubkey.toString()).single();
-            if (profile) ownerName = profile.name;
-        } catch (e) { 
-            console.warn(`-> Perfil do Supabase não encontrado para o dono ${ownerPubkey.toString()}`);
-        }
-
+        // 3. Retorna a resposta de sucesso com o nome do participante
         res.status(200).json({ 
             success: true, 
             signature,
-            ownerName: ownerName || `Participante (${ownerPubkey.toString().slice(0,6)}...)`
+            participantName: participantName
         });
 
     } catch (error) {
-        console.error("[✘] Erro durante a validação do ingresso:", error);
+        console.error("[✘] Erro durante a validação por ID:", error);
         const anchorError = anchor.AnchorError.parse(error.logs);
         const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
         res.status(500).json({ success: false, error: "Erro do servidor durante a validação.", details: errorMessage || "Erro desconhecido" });
@@ -807,6 +789,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

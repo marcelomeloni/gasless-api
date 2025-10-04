@@ -1222,7 +1222,6 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
 });
 app.post(
     '/api/create-full-event',
-    // O 'upload.fields' permite receber múltiplos arquivos com nomes diferentes
     upload.fields([
         { name: 'image', maxCount: 1 },
         { name: 'organizerLogo', maxCount: 1 }
@@ -1236,43 +1235,73 @@ app.post(
             if (!offChainData || !onChainData || !controller) {
                 return res.status(400).json({ success: false, error: "Dados do formulário ou do controlador ausentes." });
             }
+            
             const parsedOffChainData = JSON.parse(offChainData);
             const parsedOnChainData = JSON.parse(onChainData);
             const controllerPubkey = new PublicKey(controller);
             const files = req.files;
 
             // 2. Fazer o upload das imagens para o Pinata (se existirem)
-            let imageUrl = parsedOffChainData.image; // Assume URL existente se não houver arquivo
+            let imageUrl = parsedOffChainData.image;
             let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
 
             const uploadToPinata = async (file) => {
-                const formData = new FormData();
-                formData.append('file', file.buffer, {
-                    filename: file.originalname,
-                    contentType: file.mimetype,
-                });
-                const response = await axios.post("https://api.pinata.cloud/pinning/pinFileToIPFS", formData, {
-                    headers: { 'Authorization': `Bearer ${PINATA_JWT}` }
-                });
-                return `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`;
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file.buffer, {
+                        filename: file.originalname,
+                        contentType: file.mimetype,
+                    });
+                    
+                    const response = await axios.post(
+                        "https://api.pinata.cloud/pinning/pinFileToIPFS", 
+                        formData, 
+                        {
+                            headers: { 
+                                'Authorization': `Bearer ${process.env.PINATA_JWT}`,
+                                ...formData.getHeaders()
+                            },
+                            timeout: 30000
+                        }
+                    );
+                    
+                    return `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`;
+                } catch (uploadError) {
+                    console.error('Erro no upload para Pinata:', uploadError);
+                    throw new Error(`Falha no upload da imagem: ${uploadError.message}`);
+                }
             };
 
+            // Upload da imagem principal
             if (files.image?.[0]) {
                 console.log(' -> Fazendo upload da imagem do evento...');
                 imageUrl = await uploadToPinata(files.image[0]);
                 console.log(` -> Imagem do evento enviada: ${imageUrl}`);
+            } else if (!imageUrl || imageUrl.startsWith('[Arquivo:')) {
+                return res.status(400).json({ 
+                    success: false, 
+                    error: "Imagem principal do evento é obrigatória." 
+                });
             }
+
+            // Upload do logo do organizador
             if (files.organizerLogo?.[0]) {
                 console.log(' -> Fazendo upload do logo do organizador...');
                 organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
                 console.log(` -> Logo enviado: ${organizerLogoUrl}`);
+            } else if (!organizerLogoUrl || organizerLogoUrl.startsWith('[Arquivo:')) {
+                // Se não há logo, usa uma imagem padrão ou mantém vazio
+                organizerLogoUrl = '';
             }
 
             // 3. Montar o objeto de metadados final com as URLs do Pinata
             const finalMetadata = {
                 ...parsedOffChainData,
                 image: imageUrl,
-                organizer: { ...parsedOffChainData.organizer, organizerLogo: organizerLogoUrl },
+                organizer: { 
+                    ...parsedOffChainData.organizer, 
+                    organizerLogo: organizerLogoUrl 
+                },
                 properties: {
                     ...parsedOffChainData.properties,
                     dateTime: {
@@ -1280,59 +1309,146 @@ app.post(
                         start: new Date(parsedOffChainData.properties.dateTime.start).toISOString(),
                         end: new Date(parsedOffChainData.properties.dateTime.end).toISOString(),
                     }
-                }
+                },
+                // Metadados adicionais para rastreamento
+                createdAt: new Date().toISOString(),
+                createdBy: controllerPubkey.toString()
             };
             
             // 4. Fazer o upload do JSON de metadados para o Pinata
             console.log(' -> Fazendo upload do JSON de metadados...');
-            const jsonResponse = await axios.post("https://api.pinata.cloud/pinning/pinJSONToIPFS", finalMetadata, {
-                headers: { 'Authorization': `Bearer ${PINATA_JWT}` }
-            });
-            const metadataUrl = `https://gateway.pinata.cloud/ipfs/${jsonResponse.data.IpfsHash}`;
-            console.log(` -> Metadados enviados: ${metadataUrl}`);
+            try {
+                const jsonResponse = await axios.post(
+                    "https://api.pinata.cloud/pinning/pinJSONToIPFS", 
+                    finalMetadata, 
+                    {
+                        headers: { 
+                            'Authorization': `Bearer ${process.env.PINATA_JWT}`,
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 30000
+                    }
+                );
+                const metadataUrl = `https://gateway.pinata.cloud/ipfs/${jsonResponse.data.IpfsHash}`;
+                console.log(` -> Metadados enviados: ${metadataUrl}`);
 
-            // 5. Preparar dados e chamar a transação na blockchain
-            console.log(' -> Preparando transação on-chain...');
-            const eventId = new anchor.BN(Date.now());
-            
-            const [whitelistPda] = PublicKey.findProgramAddressSync([Buffer.from("whitelist"), controllerPubkey.toBuffer()], program.programId);
-            const [eventPda] = PublicKey.findProgramAddressSync([Buffer.from("event"), eventId.toBuffer('le', 8)], program.programId);
-            
-            const tiersInput = parsedOnChainData.tiers.map(tier => {
-                const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
-                return {
-                    name: tier.name,
-                    priceBrlCents: new anchor.BN(priceBRLCents),
-                    maxTicketsSupply: parseInt(tier.maxTicketsSupply, 10),
-                };
-            });
+                // 5. Preparar dados e chamar a transação na blockchain
+                console.log(' -> Preparando transação on-chain...');
+                const eventId = new anchor.BN(Date.now());
+                
+                // Encontrar PDAs
+                const [whitelistPda] = PublicKey.findProgramAddressSync(
+                    [Buffer.from("whitelist"), controllerPubkey.toBuffer()], 
+                    program.programId
+                );
+                const [eventPda] = PublicKey.findProgramAddressSync(
+                    [Buffer.from("event"), eventId.toBuffer('le', 8)], 
+                    program.programId
+                );
+                
+                // Preparar tiers
+                const tiersInput = parsedOnChainData.tiers.map(tier => {
+                    const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
+                    return {
+                        name: tier.name,
+                        priceBrlCents: new anchor.BN(priceBRLCents),
+                        maxTicketsSupply: new anchor.BN(parseInt(tier.maxTicketsSupply, 10)),
+                    };
+                });
 
-            console.log(' -> Enviando transação para a blockchain...');
-            const signature = await program.methods
-                .createEvent(
-                    eventId, 
-                    metadataUrl, 
-                    new anchor.BN(Math.floor(new Date(parsedOnChainData.salesStartDate).getTime() / 1000)), 
-                    new anchor.BN(Math.floor(new Date(parsedOnChainData.salesEndDate).getTime() / 1000)), 
-                    parseInt(parsedOnChainData.royaltyBps, 10), 
-                    parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
-                    tiersInput
-                )
-                .accounts({
-                    whitelistAccount: whitelistPda,
-                    eventAccount: eventPda,
-                    controller: controllerPubkey,      // ✅ O dono do evento é o usuário do frontend
-                    payer: payerKeypair.publicKey,      // ✅ A taxa é paga pela carteira da API
-                    systemProgram: SystemProgram.programId,
-                })
-                .rpc();
+                // Validar datas
+                const salesStartDate = new Date(parsedOnChainData.salesStartDate);
+                const salesEndDate = new Date(parsedOnChainData.salesEndDate);
+                
+                if (salesStartDate >= salesEndDate) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: "A data de fim das vendas deve ser posterior à data de início." 
+                    });
+                }
 
-            console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
-            res.status(200).json({ success: true, signature, eventAddress: eventPda.toString() });
+                // 6. **FLUXO AUTOMÁTICO: Criar e assinar transação automaticamente**
+                console.log(' -> Construindo transação...');
+                
+                // Obter blockhash mais recente
+                const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
+                
+                // Construir transação
+                const transaction = await program.methods
+                    .createEvent(
+                        eventId, 
+                        metadataUrl, 
+                        new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
+                        new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
+                        parseInt(parsedOnChainData.royaltyBps, 10), 
+                        parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
+                        tiersInput
+                    )
+                    .accounts({
+                        whitelistAccount: whitelistPda,
+                        eventAccount: eventPda,
+                        controller: controllerPubkey,
+                        payer: payerKeypair.publicKey,
+                        systemProgram: web3.SystemProgram.programId,
+                    })
+                    .transaction();
+
+                // Configurar transação
+                transaction.recentBlockhash = blockhash;
+                transaction.feePayer = payerKeypair.publicKey;
+
+                // **ASSINATURA AUTOMÁTICA**: A API assina como payer
+                console.log(' -> Assinando transação com a carteira da API...');
+                transaction.sign(payerKeypair);
+
+                // Enviar transação assinada
+                console.log(' -> Enviando transação para a blockchain...');
+                const signature = await web3.sendAndConfirmRawTransaction(
+                    program.provider.connection,
+                    transaction.serialize(),
+                    { commitment: 'confirmed' }
+                );
+
+                console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
+                
+                // Aguardar confirmação
+                console.log(' -> Aguardando confirmação...');
+                await program.provider.connection.confirmTransaction({
+                    signature,
+                    blockhash,
+                    lastValidBlockHeight,
+                }, 'confirmed');
+
+                console.log(`[🎉] Transação confirmada! Evento criado em: ${eventPda.toString()}`);
+
+                // Retornar sucesso
+                res.status(200).json({ 
+                    success: true, 
+                    signature, 
+                    eventAddress: eventPda.toString(),
+                    eventId: eventId.toString(),
+                    metadataUrl: metadataUrl,
+                    message: "Evento criado automaticamente com sucesso!" 
+                });
+
+            } catch (pinataError) {
+                console.error('❌ Erro no upload para Pinata:', pinataError);
+                throw new Error(`Falha no upload dos metadados: ${pinataError.message}`);
+            }
 
         } catch (error) {
-            console.error("❌ Erro no processo de criação completo do evento:", error.response?.data || error.message);
-            res.status(500).json({ success: false, error: error.message || 'Ocorreu um erro interno no servidor.' });
+            console.error("❌ Erro no processo de criação completo do evento:", error);
+            
+            // Log detalhado para debugging
+            if (error.logs) {
+                console.error('Logs da transação:', error.logs);
+            }
+            
+            res.status(500).json({ 
+                success: false, 
+                error: error.message || 'Ocorreu um erro interno no servidor.',
+                details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
         }
     }
 );
@@ -1340,43 +1456,3 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

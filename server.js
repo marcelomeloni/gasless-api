@@ -22,7 +22,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const idl = JSON.parse(fs.readFileSync(path.resolve(__dirname, './ticketing_system.json'), 'utf8'));
-
+const web3 = require('@solana/web3.js');
 // --- ENVIRONMENT VARIABLES & CONSTANTS ---
 const app = express();
 app.use(cors());
@@ -63,7 +63,15 @@ const program = new Program(idl, PROGRAM_ID, provider);
 console.log(`[+] API configured with program: ${PROGRAM_ID.toString()}`);
 console.log(`[+] Payer wallet: ${payerKeypair.publicKey.toString()}`);
 console.log(`[+] Supabase client initialized.`);
-
+if (!MERCADOPAGO_ACCESS_TOKEN) {
+    throw new Error("A variável de ambiente MERCADOPAGO_ACCESS_TOKEN é obrigatória.");
+}
+const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
+// Configure Mercado Pago
+mercadopago.configure({
+    access_token: MERCADOPAGO_ACCESS_TOKEN,
+    sandbox: process.env.NODE_ENV !== 'production', // Use sandbox for testing
+});
 // --- SUPABASE HELPER FUNCTION ---
 const upsertUserInSupabase = async (userData) => {
     const { name, phone, email, company, sector, role, wallet_address } = userData;
@@ -152,8 +160,417 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
 // const { saveRegistrationData } = require('./supabase-helpers');
 
 // Assumindo que a função 'saveRegistrationData' que criamos antes já existe no seu código.
-// const { saveRegistrationData } = require('./supabase-helpers');
+async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, priceBRLCents, userEmail, userName }) {
+    try {
+        const { name, phone, email, company, sector, role } = formData;
 
+        // 1. Geração da nova carteira para o usuário
+        const mnemonic = bip39.generateMnemonic();
+        const newUserKeypair = getKeypairFromMnemonic(mnemonic);
+        const newUserPublicKey = newUserKeypair.publicKey;
+        const privateKey = bs58.encode(newUserKeypair.secretKey);
+        
+        // 2. Lógica on-chain para mintar o ingresso
+        const eventPubkey = new PublicKey(eventAddress);
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+
+        const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
+        const dataHash = createHash('sha256').update(userDataString).digest();
+        
+        // Registrar usuário on-chain
+        const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
+        await program.methods.registerUser(Array.from(dataHash)).accounts({
+            authority: newUserPublicKey, userProfile: userProfilePda,
+            payer: payerKeypair.publicKey, systemProgram: SystemProgram.programId,
+        }).rpc();
+
+        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
+        await program.methods.createBuyerCounter().accounts({
+            payer: payerKeypair.publicKey, event: eventPubkey, buyer: newUserPublicKey,
+            buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
+        }).rpc();
+        
+        const mintKeypair = Keypair.generate();
+        const mintAddress = mintKeypair.publicKey.toString();
+        
+        const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+        const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
+        const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
+        const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
+
+        const signature = await program.methods.mintTicket(tierIndex).accounts({
+            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
+            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
+            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
+        }).signers([payerKeypair, mintKeypair]).rpc();
+        
+        console.log(`[✔] Paid ticket minted successfully! Sig: ${signature}`);
+        
+        // 3. Salva tudo no banco de dados
+        const registrationId = await saveRegistrationData({
+            eventAddress,
+            wallet_address: newUserPublicKey.toString(),
+            mint_address: mintAddress,
+            name, phone, email, company, sector, role
+        });
+
+        // 4. Envio de e-mail
+        if (email) {
+            try {
+                const metadataResponse = await fetch(eventAccount.metadataUri);
+                const metadata = await metadataResponse.json();
+                const ticketDataForEmail = {
+                    eventName: metadata.name, 
+                    eventDate: metadata.properties.dateTime.start,
+                    eventLocation: metadata.properties.location, 
+                    mintAddress: mintAddress,
+                    seedPhrase: mnemonic, 
+                    privateKey: privateKey, 
+                    eventImage: metadata.image,
+                    registrationId: registrationId,
+                    isPaid: true,
+                    paymentAmount: (priceBRLCents / 100).toFixed(2)
+                };
+                sendTicketEmail({ name, email }, ticketDataForEmail);
+            } catch(e) {
+                console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+            }
+        }
+
+        return {
+            success: true, 
+            publicKey: newUserPublicKey.toString(), 
+            seedPhrase: mnemonic, 
+            privateKey: privateKey, 
+            mintAddress: mintAddress, 
+            signature,
+            registrationId: registrationId,
+            isPaid: true
+        };
+
+    } catch (error) {
+        console.error("[✘] Error during paid ticket processing:", error);
+        throw error;
+    }
+}/**
+ * Generate QR code for Mercado Pago payment
+ */
+app.post('/api/generate-payment-qr', async (req, res) => {
+    const {
+        eventAddress,
+        tierIndex,
+        priceBRLCents,
+        userName,
+        userEmail,
+        tierName,
+        eventName,
+        formData
+    } = req.body;
+
+    try {
+        const amount = parseFloat((priceBRLCents / 100).toFixed(2));
+        const description = `Ingresso: ${eventName} - ${tierName}`;
+        const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
+
+        // Create Mercado Pago preference for QR code
+        const preference = {
+            items: [
+                {
+                    title: description,
+                    unit_price: amount,
+                    quantity: 1,
+                    currency_id: 'BRL',
+                }
+            ],
+            payment_methods: {
+                excluded_payment_methods: [
+                    { id: 'credit_card' },
+                    { id: 'debit_card' },
+                    { id: 'bank_transfer' }
+                ],
+                excluded_payment_types: [
+                    { id: 'credit_card' },
+                    { id: 'debit_card' },
+                    { id: 'bank_transfer' }
+                ],
+                installments: 1
+            },
+            statement_descriptor: `EVENTO-${eventName.substring(0, 10)}`,
+            external_reference: externalReference,
+            notification_url: `${process.env.API_URL || 'http://localhost:3001'}/webhooks/mercadopago`,
+            expires: true,
+            expiration_date_from: new Date().toISOString(),
+            expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(), // 15 minutes
+            back_urls: {
+                success: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/success`,
+                failure: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/failure`,
+                pending: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/pending`
+            },
+            auto_return: 'approved',
+        };
+
+        const response = await mercadopago.preferences.create(preference);
+        
+        // Store payment session
+        activePaymentSessions.set(externalReference, {
+            eventAddress,
+            tierIndex,
+            priceBRLCents,
+            formData,
+            userName,
+            userEmail,
+            tierName,
+            eventName,
+            preferenceId: response.body.id,
+            createdAt: new Date(),
+            status: 'pending'
+        });
+
+        // Set expiration timeout (15 minutes)
+        setTimeout(() => {
+            if (activePaymentSessions.has(externalReference)) {
+                const session = activePaymentSessions.get(externalReference);
+                if (session.status === 'pending') {
+                    session.status = 'expired';
+                    activePaymentSessions.set(externalReference, session);
+                }
+            }
+        }, 15 * 60 * 1000);
+
+        res.status(200).json({
+            success: true,
+            qrCode: response.body.point_of_interaction.transaction_data.qr_code,
+            qrCodeBase64: response.body.point_of_interaction.transaction_data.qr_code_base64,
+            externalReference: externalReference,
+            ticketUrl: response.body.init_point,
+            preferenceId: response.body.id,
+            expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+            amount: amount
+        });
+
+    } catch (error) {
+        console.error('Error generating Mercado Pago QR code:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to generate payment QR code',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * Check payment status
+ */
+app.get('/api/payment-status/:externalReference', async (req, res) => {
+    const { externalReference } = req.params;
+
+    try {
+        const paymentSession = activePaymentSessions.get(externalReference);
+        
+        if (!paymentSession) {
+            return res.status(404).json({
+                success: false,
+                error: 'Payment session not found'
+            });
+        }
+
+        // Search for payments with this external reference
+        const filters = {
+            external_reference: externalReference
+        };
+
+        const searchResult = await mercadopago.payment.search({
+            qs: filters
+        });
+
+        const payments = searchResult.body.results;
+        
+        if (payments.length === 0) {
+            return res.status(200).json({
+                success: true,
+                status: 'pending',
+                paid: false
+            });
+        }
+
+        const payment = payments[0];
+        const isPaid = payment.status === 'approved';
+        
+        if (isPaid && paymentSession.status === 'pending') {
+            paymentSession.status = 'paid';
+            paymentSession.paymentId = payment.id;
+            activePaymentSessions.set(externalReference, paymentSession);
+        }
+
+        res.status(200).json({
+            success: true,
+            status: payment.status,
+            paid: isPaid,
+            paymentId: payment.id,
+            transactionAmount: payment.transaction_amount,
+            currency: payment.currency_id,
+            lastUpdated: payment.date_last_updated
+        });
+
+    } catch (error) {
+        console.error('Error checking payment status:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to check payment status',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * Process paid ticket after successful payment
+ */
+app.post('/api/process-paid-ticket', async (req, res) => {
+    const { externalReference } = req.body;
+
+    try {
+        const paymentSession = activePaymentSessions.get(externalReference);
+        
+        if (!paymentSession) {
+            return res.status(404).json({
+                success: false,
+                error: 'Payment session not found'
+            });
+        }
+
+        // Verify payment is actually completed
+        const filters = {
+            external_reference: externalReference,
+            status: 'approved'
+        };
+
+        const searchResult = await mercadopago.payment.search({
+            qs: filters
+        });
+
+        const approvedPayments = searchResult.body.results;
+        
+        if (approvedPayments.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Payment not completed or verified',
+                status: 'pending'
+            });
+        }
+
+        // Update session status
+        paymentSession.status = 'paid';
+        paymentSession.paymentId = approvedPayments[0].id;
+        activePaymentSessions.set(externalReference, paymentSession);
+
+        // Process ticket minting using existing logic
+        const { eventAddress, tierIndex, formData, userEmail, userName } = paymentSession;
+        
+        // Call your existing minting logic here
+        // For new users (without wallet)
+        const mintResponse = await processPaidTicketForNewUser({
+            eventAddress,
+            tierIndex,
+            formData,
+            priceBRLCents: paymentSession.priceBRLCents,
+            userEmail,
+            userName
+        });
+
+        // Remove session after successful processing
+        activePaymentSessions.delete(externalReference);
+
+        res.status(200).json({
+            success: true,
+            message: 'Payment verified and ticket processed successfully',
+            ticketData: mintResponse
+        });
+
+    } catch (error) {
+        console.error('Error processing paid ticket:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to process paid ticket',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * Mercado Pago webhook for payment notifications
+ */
+app.post('/webhooks/mercadopago', async (req, res) => {
+    try {
+        const { type, data } = req.body;
+        
+        if (type === 'payment') {
+            const paymentId = data.id;
+            console.log(`[Webhook] Received payment update for ID: ${paymentId}`);
+            
+            // Get payment details
+            const payment = await mercadopago.payment.get(paymentId);
+            const externalReference = payment.body.external_reference;
+            
+            if (payment.body.status === 'approved' && externalReference) {
+                const paymentSession = activePaymentSessions.get(externalReference);
+                
+                if (paymentSession && paymentSession.status === 'pending') {
+                    console.log(`[Webhook] Processing paid ticket for: ${externalReference}`);
+                    
+                    // Update session status
+                    paymentSession.status = 'paid';
+                    paymentSession.paymentId = paymentId;
+                    activePaymentSessions.set(externalReference, paymentSession);
+                    
+                    // Here you could trigger automatic ticket processing
+                    // or wait for frontend to call /api/process-paid-ticket
+                }
+            }
+        }
+        
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('Error processing webhook:', error);
+        res.status(500).send('Error processing webhook');
+    }
+});
+app.post('/generate-wallet-and-mint-paid', async (req, res) => {
+    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents, paymentMethod } = req.body;
+    
+    if (!eventAddress || tierIndex === undefined || !name || !phone) {
+        return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
+    }
+    
+    if (paymentMethod !== 'pix') {
+        return res.status(400).json({ error: "Método de pagamento deve ser PIX." });
+    }
+
+    console.log(`[+] Starting paid onboarding for user: ${name}`);
+
+    try {
+        const result = await processPaidTicketForNewUser({
+            eventAddress,
+            tierIndex,
+            formData: { name, phone, email, company, sector, role },
+            priceBRLCents,
+            userEmail: email,
+            userName: name
+        });
+
+        res.status(200).json(result);
+
+    } catch (error) {
+        console.error("[✘] Error during paid onboarding:", error);
+        const anchorError = anchor.AnchorError.parse(error.logs);
+        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
+        res.status(500).json({ 
+            error: "Server error during paid onboarding.", 
+            details: errorMessage || "Unknown error" 
+        });
+    }
+});
 app.post('/generate-wallet-and-mint', async (req, res) => {
     const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
     if (!eventAddress || tierIndex === undefined || !name || !phone) {
@@ -913,6 +1330,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -146,69 +146,76 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
 // Assumindo que a função 'saveRegistrationData' já existe no seu código.
 // const { saveRegistrationData } = require('./supabase-helpers');
 
-app.post('/mint-for-existing-user', async (req, res) => {
-    const { eventAddress, buyerAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
-    if (!eventAddress || !buyerAddress || tierIndex === undefined) {
-        return res.status(400).json({ error: "'eventAddress', 'buyerAddress', e 'tierIndex' são obrigatórios." });
+// Assumindo que a função 'saveRegistrationData' que criamos antes já existe no seu código.
+// const { saveRegistrationData } = require('./supabase-helpers');
+
+app.post('/generate-wallet-and-mint', async (req, res) => {
+    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
+    if (!eventAddress || tierIndex === undefined || !name || !phone) {
+        return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
     }
-    console.log(`[+] Minting for existing user: ${buyerAddress}`);
+    console.log(`[+] Starting full onboarding for user: ${name}`);
 
     try {
-        const eventPubkey = new PublicKey(eventAddress);
-        const buyer = new PublicKey(buyerAddress);
-
+        // 1. Geração da nova carteira para o usuário
+        const mnemonic = bip39.generateMnemonic();
+        const newUserKeypair = getKeypairFromMnemonic(mnemonic);
+        const newUserPublicKey = newUserKeypair.publicKey;
+        const privateKey = bs58.encode(newUserKeypair.secretKey);
+        
         // --- ALTERAÇÃO AQUI ---
         // Usamos a nova função que salva os dados em 'profiles' e cria um novo 'registrations'
         await saveRegistrationData({
             eventAddress,
-            wallet_address: buyer.toString(),
+            wallet_address: newUserPublicKey.toString(),
             name, phone, email, company, sector, role
         });
         
+        // 2. Lógica on-chain (permanece a mesma)
+        const eventPubkey = new PublicKey(eventAddress);
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const selectedTier = eventAccount.tiers[tierIndex];
         if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
 
-        // Garante que o perfil e o contador on-chain existem antes de mintar
-        const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), buyer.toBuffer()], program.programId);
-        const userProfileAccount = await connection.getAccountInfo(userProfilePda);
-        if (!userProfileAccount) {
-            console.log(" -> Perfil on-chain não encontrado, criando...");
-            const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
-            const dataHash = createHash('sha256').update(userDataString).digest();
-            await program.methods.registerUser(Array.from(dataHash)).accounts({
-                authority: buyer, 
-                userProfile: userProfilePda,
-                payer: payerKeypair.publicKey, 
-                systemProgram: SystemProgram.programId,
-            }).rpc();
+        const priceFromContract = selectedTier.priceBrlCents.toNumber() || 0;
+        
+        if (priceBRLCents && priceBRLCents !== priceFromContract) {
+            console.warn(`[WARN] Price mismatch: Sent ${priceBRLCents}, Contract ${priceFromContract}`);
         }
 
-        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), buyer.toBuffer()], program.programId);
-        const accountInfo = await connection.getAccountInfo(buyerTicketCountPda);
-        if (!accountInfo) {
-            await program.methods.createBuyerCounter().accounts({
-                payer: payerKeypair.publicKey, 
-                event: eventPubkey, 
-                buyer: buyer,
-                buyerTicketCount: buyerTicketCountPda, 
-                systemProgram: SystemProgram.programId
-            }).rpc();
-        }
+        const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
+        const dataHash = createHash('sha256').update(userDataString).digest();
         
-        // Lógica de Mint
+        // ... (resto da lógica on-chain para registrar usuário, criar contador e mintar o ingresso) ...
+
+        const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
+        await program.methods.registerUser(Array.from(dataHash)).accounts({
+            authority: newUserPublicKey, 
+            userProfile: userProfilePda,
+            payer: payerKeypair.publicKey, 
+            systemProgram: SystemProgram.programId,
+        }).rpc();
+
+        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
+        await program.methods.createBuyerCounter().accounts({
+            payer: payerKeypair.publicKey, 
+            event: eventPubkey, 
+            buyer: newUserPublicKey,
+            buyerTicketCount: buyerTicketCountPda, 
+            systemProgram: SystemProgram.programId
+        }).rpc();
+        
         const mintKeypair = Keypair.generate();
-        const mintAddress = mintKeypair.publicKey.toString();
         const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
-        const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, buyer);
+        const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
         const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
 
         const signature = await program.methods.mintTicket(tierIndex).accounts({
             globalConfig: globalConfigPda, 
             event: eventPubkey, 
             payer: payerKeypair.publicKey, 
-            buyer: buyer,
+            buyer: newUserPublicKey,
             mintAccount: mintKeypair.publicKey, 
             ticket: ticketPda, 
             buyerTicketCount: buyerTicketCountPda,
@@ -220,40 +227,54 @@ app.post('/mint-for-existing-user', async (req, res) => {
             systemProgram: SystemProgram.programId, 
             rent: SYSVAR_RENT_PUBKEY,
         }).signers([payerKeypair, mintKeypair]).rpc();
-
-        console.log(`[✔] Mint bem-sucedido para usuário existente! Sig: ${signature}`);
-
-        // Envio de e-mail em segundo plano
+        
+        console.log(`[✔] Onboarding successful! Sig: ${signature}`);
+        
+        // 3. Envio de e-mail em segundo plano
         if (email) {
             try {
                 const metadataResponse = await fetch(eventAccount.metadataUri);
                 const metadata = await metadataResponse.json();
-                
+
+                // Correção de sintaxe aqui (adicionado 'const ticketDataForEmail')
                 const ticketDataForEmail = {
                     eventName: metadata.name, 
                     eventDate: metadata.properties.dateTime.start,
                     eventLocation: metadata.properties.location, 
-                    mintAddress: mintAddress,
+                    mintAddress: mintKeypair.publicKey.toString(),
+                    seedPhrase: mnemonic, 
+                    privateKey: privateKey, 
                     eventImage: metadata.image, 
-                    // ... outros dados do metadata
+                    eventDescription: metadata.description, 
+                    eventCategory: metadata.category, 
+                    eventTags: metadata.tags, 
+                    organizerName: metadata.organizer.name,
+                    organizerLogo: metadata.organizer.organizerLogo, 
+                    organizerWebsite: metadata.organizer.website,
                 };
-                
                 sendTicketEmail({ name, email }, ticketDataForEmail);
             } catch (e) {
-                console.error("Falha ao preparar/enviar e-mail:", e);
+                console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
             }
         }
 
-        res.status(200).json({ success: true, signature, mintAddress: mintAddress });
+        // 4. Resposta ao cliente
+        res.status(200).json({ 
+            success: true, 
+            publicKey: newUserPublicKey.toString(), 
+            seedPhrase: mnemonic, 
+            privateKey: privateKey, 
+            mintAddress: mintKeypair.publicKey.toString(), 
+            signature 
+        });
 
     } catch (error) {
-        console.error("[✘] Erro ao mintar para usuário existente:", error);
+        console.error("[✘] Error during onboarding:", error);
         const anchorError = anchor.AnchorError.parse(error.logs);
         const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
         res.status(500).json({ 
-            success: false, 
-            error: "Erro do servidor ao mintar para usuário existente.", 
-            details: errorMessage || "Erro desconhecido" 
+            error: "Server error during onboarding.", 
+            details: errorMessage || "Unknown error" 
         });
     }
 });
@@ -786,6 +807,7 @@ app.post('/validate-ticket', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

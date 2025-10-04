@@ -19,7 +19,7 @@ import { createClient } from '@supabase/supabase-js';
 import { sendTicketEmail } from './services/emailService.jsx';
 
 // --- MERCADO PAGO IMPORT ---
-import mercadopago from 'mercadopago';
+import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
 // --- INITIAL SETUP ---
 dotenv.config();
@@ -53,9 +53,11 @@ if (!MERCADOPAGO_ACCESS_TOKEN) {
 }
 
 // Configure Mercado Pago
-mercadopago.configure({
-    access_token: MERCADOPAGO_ACCESS_TOKEN,
-    sandbox: process.env.NODE_ENV !== 'production',
+const client = new MercadoPagoConfig({ 
+    accessToken: MERCADOPAGO_ACCESS_TOKEN,
+    options: {
+        timeout: 5000 // Opcional: tempo limite para as requisições
+    }
 });
 
 const PROGRAM_ID = new PublicKey("5kQZsq3z1P9TQuR2tBXJjhKr46JnEcsDKYDnEfNCB792");
@@ -318,7 +320,8 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             auto_return: 'approved',
         };
 
-        const response = await mercadopago.preferences.create(preference);
+        const preference = new Preference(client);
+const response = await preference.create({ body: preferenceData });
         
         // Store payment session
         activePaymentSessions.set(externalReference, {
@@ -387,7 +390,8 @@ app.get('/api/payment-status/:externalReference', async (req, res) => {
             external_reference: externalReference
         };
 
-        const searchResult = await mercadopago.payment.search({
+        const payment = new Payment(client);
+const searchResult = await payment.search({
             qs: filters
         });
 
@@ -452,7 +456,8 @@ app.post('/api/process-paid-ticket', async (req, res) => {
             status: 'approved'
         };
 
-        const searchResult = await mercadopago.payment.search({
+        const payment = new Payment(client);
+const searchResult = await payment.search({
             qs: filters
         });
 
@@ -1332,6 +1337,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

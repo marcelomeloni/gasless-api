@@ -1531,45 +1531,45 @@ app.post(
 
                 // 6. **FLUXO AUTOMÁTICO: Criar e assinar transação automaticamente**
                 console.log(' -> Construindo transação...');
-                
-                // Obter blockhash mais recente
-                const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
-                
-                // Construir transação
-                const transaction = await program.methods
-                    .createEvent(
-                        eventId, 
-                        metadataUrl, 
-                        new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
-                        new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
-                        parseInt(parsedOnChainData.royaltyBps, 10), 
-                        parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
-                        tiersInput
-                    )
-                    .accounts({
-                        whitelistAccount: whitelistPda,
-                        eventAccount: eventPda,
-                        controller: controllerPubkey,
-                        payer: payerKeypair.publicKey,
-                        systemProgram: web3.SystemProgram.programId,
-                    })
-                    .transaction();
 
-                // Configurar transação
-                transaction.recentBlockhash = blockhash;
-                transaction.feePayer = payerKeypair.publicKey;
+// Obter blockhash mais recente
+const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
 
-                // **ASSINATURA AUTOMÁTICA**: A API assina como payer
-                console.log(' -> Assinando transação com a carteira da API...');
-                transaction.sign(payerKeypair);
+// Construir transação
+const transaction = await program.methods
+    .createEvent(
+        eventId, 
+        metadataUrl, 
+        new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
+        new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
+        parseInt(parsedOnChainData.royaltyBps, 10), 
+        parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
+        tiersInput
+    )
+    .accounts({
+        whitelistAccount: whitelistPda,
+        eventAccount: eventPda,
+        controller: controllerPubkey,
+        payer: payerKeypair.publicKey,
+        systemProgram: SystemProgram.programId, // ✅ Already using Solana's SystemProgram
+    })
+    .transaction();
 
-                // Enviar transação assinada
-                console.log(' -> Enviando transação para a blockchain...');
-                const signature = await web3.sendAndConfirmRawTransaction(
-                    program.provider.connection,
-                    transaction.serialize(),
-                    { commitment: 'confirmed' }
-                );
+// Configurar transação
+transaction.recentBlockhash = blockhash;
+transaction.feePayer = payerKeypair.publicKey;
+
+// ASSINATURA AUTOMÁTICA: A API assina como payer
+console.log(' -> Assinando transação com a carteira da API...');
+transaction.sign(payerKeypair);
+
+// ✅ CORREÇÃO: Usar o método correto do Solana Web3.js
+console.log(' -> Enviando transação para a blockchain...');
+const signature = await sendAndConfirmRawTransaction(
+    program.provider.connection,
+    transaction.serialize(),
+    { commitment: 'confirmed' }
+);
 
                 console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
                 
@@ -1618,6 +1618,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

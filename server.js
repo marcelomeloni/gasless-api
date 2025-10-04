@@ -6,7 +6,9 @@ import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bip39 from 'bip39';
-
+import multer from 'multer';
+import axios from 'axios';
+import FormData from 'form-data';
 import { derivePath } from 'ed25519-hd-key';
 import fs from 'fs';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes/index.js';
@@ -31,11 +33,14 @@ const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
 const PAYER_MNEMONIC = process.env.PAYER_MNEMONIC;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-
+const PINATA_JWT = process.env.PINATA_JWT;
+const upload = multer({ storage: multer.memoryStorage() });
 if (!SOLANA_RPC_URL || !PAYER_MNEMONIC || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
     throw new Error("Required environment variables are missing (Solana or Supabase).");
 }
-
+if (!PINATA_JWT) {
+    throw new Error("A variável de ambiente PINATA_JWT é obrigatória.");
+}
 const PROGRAM_ID = new PublicKey("5kQZsq3z1P9TQuR2tBXJjhKr46JnEcsDKYDnEfNCB792");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
@@ -253,6 +258,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
         });
     }
 });
+
 app.get('/check-organizer-permission/:walletAddress', async (req, res) => {
     const { walletAddress } = req.params;
     if (!walletAddress) {
@@ -787,10 +793,127 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
         res.status(500).json({ success: false, error: "Erro do servidor durante a validação.", details: errorMessage || "Erro desconhecido" });
     }
 });
+app.post(
+    '/api/create-full-event',
+    // O 'upload.fields' permite receber múltiplos arquivos com nomes diferentes
+    upload.fields([
+        { name: 'image', maxCount: 1 },
+        { name: 'organizerLogo', maxCount: 1 }
+    ]),
+    async (req, res) => {
+        console.log('[+] Recebida requisição para criar evento completo.');
+
+        try {
+            // 1. Extrair e converter os dados do FormData
+            const { offChainData, onChainData, controller } = req.body;
+            if (!offChainData || !onChainData || !controller) {
+                return res.status(400).json({ success: false, error: "Dados do formulário ou do controlador ausentes." });
+            }
+            const parsedOffChainData = JSON.parse(offChainData);
+            const parsedOnChainData = JSON.parse(onChainData);
+            const controllerPubkey = new web3.PublicKey(controller);
+            const files = req.files;
+
+            // 2. Fazer o upload das imagens para o Pinata (se existirem)
+            let imageUrl = parsedOffChainData.image; // Assume URL existente se não houver arquivo
+            let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
+
+            const uploadToPinata = async (file) => {
+                const formData = new FormData();
+                formData.append('file', file.buffer, {
+                    filename: file.originalname,
+                    contentType: file.mimetype,
+                });
+                const response = await axios.post("https://api.pinata.cloud/pinning/pinFileToIPFS", formData, {
+                    headers: { 'Authorization': `Bearer ${PINATA_JWT}` }
+                });
+                return `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`;
+            };
+
+            if (files.image?.[0]) {
+                console.log(' -> Fazendo upload da imagem do evento...');
+                imageUrl = await uploadToPinata(files.image[0]);
+                console.log(` -> Imagem do evento enviada: ${imageUrl}`);
+            }
+            if (files.organizerLogo?.[0]) {
+                console.log(' -> Fazendo upload do logo do organizador...');
+                organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
+                console.log(` -> Logo enviado: ${organizerLogoUrl}`);
+            }
+
+            // 3. Montar o objeto de metadados final com as URLs do Pinata
+            const finalMetadata = {
+                ...parsedOffChainData,
+                image: imageUrl,
+                organizer: { ...parsedOffChainData.organizer, organizerLogo: organizerLogoUrl },
+                properties: {
+                    ...parsedOffChainData.properties,
+                    dateTime: {
+                        ...parsedOffChainData.properties.dateTime,
+                        start: new Date(parsedOffChainData.properties.dateTime.start).toISOString(),
+                        end: new Date(parsedOffChainData.properties.dateTime.end).toISOString(),
+                    }
+                }
+            };
+            
+            // 4. Fazer o upload do JSON de metadados para o Pinata
+            console.log(' -> Fazendo upload do JSON de metadados...');
+            const jsonResponse = await axios.post("https://api.pinata.cloud/pinning/pinJSONToIPFS", finalMetadata, {
+                headers: { 'Authorization': `Bearer ${PINATA_JWT}` }
+            });
+            const metadataUrl = `https://gateway.pinata.cloud/ipfs/${jsonResponse.data.IpfsHash}`;
+            console.log(` -> Metadados enviados: ${metadataUrl}`);
+
+            // 5. Preparar dados e chamar a transação na blockchain
+            console.log(' -> Preparando transação on-chain...');
+            const eventId = new anchor.BN(Date.now());
+            
+            const [whitelistPda] = web3.PublicKey.findProgramAddressSync([Buffer.from("whitelist"), controllerPubkey.toBuffer()], program.programId);
+            const [eventPda] = web3.PublicKey.findProgramAddressSync([Buffer.from("event"), eventId.toBuffer('le', 8)], program.programId);
+            
+            const tiersInput = parsedOnChainData.tiers.map(tier => {
+                const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
+                return {
+                    name: tier.name,
+                    priceBrlCents: new anchor.BN(priceBRLCents),
+                    maxTicketsSupply: parseInt(tier.maxTicketsSupply, 10),
+                };
+            });
+
+            console.log(' -> Enviando transação para a blockchain...');
+            const signature = await program.methods
+                .createEvent(
+                    eventId, 
+                    metadataUrl, 
+                    new anchor.BN(Math.floor(new Date(parsedOnChainData.salesStartDate).getTime() / 1000)), 
+                    new anchor.BN(Math.floor(new Date(parsedOnChainData.salesEndDate).getTime() / 1000)), 
+                    parseInt(parsedOnChainData.royaltyBps, 10), 
+                    parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
+                    tiersInput
+                )
+                .accounts({
+                    whitelistAccount: whitelistPda,
+                    eventAccount: eventPda,
+                    controller: controllerPubkey,      // ✅ O dono do evento é o usuário do frontend
+                    payer: payerKeypair.publicKey,      // ✅ A taxa é paga pela carteira da API
+                    systemProgram: web3.SystemProgram.programId,
+                })
+                .rpc();
+
+            console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
+            res.status(200).json({ success: true, signature, eventAddress: eventPda.toString() });
+
+        } catch (error) {
+            console.error("❌ Erro no processo de criação completo do evento:", error.response?.data || error.message);
+            res.status(500).json({ success: false, error: error.message || 'Ocorreu um erro interno no servidor.' });
+        }
+    }
+);
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -23,6 +23,7 @@
     "express": "^4.19.2",
     "form-data": "^4.0.4",
     "jspdf": "^3.0.3",
+    "mercadopago": "^2.9.0",
     "multer": "^2.0.2",
     "qrcode": "^1.5.4",
     "react-email": "^4.2.12",

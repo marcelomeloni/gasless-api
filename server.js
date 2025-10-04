@@ -402,8 +402,8 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
             back_urls: {
                 success: `${cleanFrontendUrl}/payment/success`,
-                failure: `${cleanFrontendUrl}/payment/failure`, 
-                pending: `${cleanFrontendUrl}/payment/pending`
+                failure: `${cleanFrontendUrl}/events`, 
+                pending: `${cleanFrontendUrl}/events`
             },
             auto_return: 'approved',
         };
@@ -1620,6 +1620,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

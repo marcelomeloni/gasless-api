@@ -1293,16 +1293,17 @@ app.post(
             };
 
             // Upload da imagem principal
-            if (files.image?.[0]) {
-                console.log(' -> Fazendo upload da imagem do evento...');
-                imageUrl = await uploadToPinata(files.image[0]);
-                console.log(` -> Imagem do evento enviada: ${imageUrl}`);
-            } else if (!imageUrl || imageUrl.startsWith('[Arquivo:')) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: "Imagem principal do evento é obrigatória." 
-                });
-            }
+          if (files.image?.[0]) {
+    console.log(' -> Fazendo upload da imagem do evento...');
+    imageUrl = await uploadToPinata(files.image[0]);
+    console.log(` -> Imagem do evento enviada: ${imageUrl}`);
+} else {
+    console.error('❌ Nenhuma imagem foi recebida no upload');
+    return res.status(400).json({ 
+        success: false, 
+        error: "Imagem principal do evento é obrigatória." 
+    });
+}
 
             // Upload do logo do organizador
             if (files.organizerLogo?.[0]) {
@@ -1476,4 +1477,5 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 

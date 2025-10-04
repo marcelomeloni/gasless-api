@@ -283,8 +283,8 @@ app.post('/api/generate-payment-qr', async (req, res) => {
         const description = `Ingresso: ${eventName} - ${tierName}`;
         const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
 
-        // Create Mercado Pago preference for QR code
-        const preference = {
+        // Create Mercado Pago preference data for QR code
+        const preferenceData = {
             items: [
                 {
                     title: description,
@@ -320,8 +320,9 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             auto_return: 'approved',
         };
 
-        const preference = new Preference(client);
-const response = await preference.create({ body: preferenceData });
+        // CORREÇÃO: Use um nome diferente para a instância
+        const preferenceClient = new Preference(client);
+        const response = await preferenceClient.create({ body: preferenceData });
         
         // Store payment session
         activePaymentSessions.set(externalReference, {
@@ -333,7 +334,7 @@ const response = await preference.create({ body: preferenceData });
             userEmail,
             tierName,
             eventName,
-            preferenceId: response.body.id,
+            preferenceId: response.id,
             createdAt: new Date(),
             status: 'pending'
         });
@@ -351,11 +352,11 @@ const response = await preference.create({ body: preferenceData });
 
         res.status(200).json({
             success: true,
-            qrCode: response.body.point_of_interaction.transaction_data.qr_code,
-            qrCodeBase64: response.body.point_of_interaction.transaction_data.qr_code_base64,
+            qrCode: response.point_of_interaction.transaction_data.qr_code,
+            qrCodeBase64: response.point_of_interaction.transaction_data.qr_code_base64,
             externalReference: externalReference,
-            ticketUrl: response.body.init_point,
-            preferenceId: response.body.id,
+            ticketUrl: response.init_point,
+            preferenceId: response.id,
             expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
             amount: amount
         });
@@ -390,12 +391,13 @@ app.get('/api/payment-status/:externalReference', async (req, res) => {
             external_reference: externalReference
         };
 
-        const payment = new Payment(client);
-const searchResult = await payment.search({
+        // CORREÇÃO: Use um nome diferente para a instância
+        const paymentClient = new Payment(client);
+        const searchResult = await paymentClient.search({
             qs: filters
         });
 
-        const payments = searchResult.body.results;
+        const payments = searchResult.results;
         
         if (payments.length === 0) {
             return res.status(200).json({
@@ -519,11 +521,12 @@ app.post('/webhooks/mercadopago', async (req, res) => {
             const paymentId = data.id;
             console.log(`[Webhook] Received payment update for ID: ${paymentId}`);
             
-            // Get payment details
-            const payment = await mercadopago.payment.get(paymentId);
-            const externalReference = payment.body.external_reference;
+            // Get payment details usando o novo SDK
+            const paymentClient = new Payment(client);
+            const payment = await paymentClient.get({ id: paymentId });
+            const externalReference = payment.external_reference;
             
-            if (payment.body.status === 'approved' && externalReference) {
+            if (payment.status === 'approved' && externalReference) {
                 const paymentSession = activePaymentSessions.get(externalReference);
                 
                 if (paymentSession && paymentSession.status === 'pending') {
@@ -1337,6 +1340,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

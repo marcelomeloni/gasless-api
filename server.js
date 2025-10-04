@@ -1228,7 +1228,7 @@ app.post(
             }
             const parsedOffChainData = JSON.parse(offChainData);
             const parsedOnChainData = JSON.parse(onChainData);
-            const controllerPubkey = new web3.PublicKey(controller);
+            const controllerPubkey = new PublicKey(controller);
             const files = req.files;
 
             // 2. Fazer o upload das imagens para o Pinata (se existirem)
@@ -1285,8 +1285,8 @@ app.post(
             console.log(' -> Preparando transação on-chain...');
             const eventId = new anchor.BN(Date.now());
             
-            const [whitelistPda] = web3.PublicKey.findProgramAddressSync([Buffer.from("whitelist"), controllerPubkey.toBuffer()], program.programId);
-            const [eventPda] = web3.PublicKey.findProgramAddressSync([Buffer.from("event"), eventId.toBuffer('le', 8)], program.programId);
+            const [whitelistPda] = PublicKey.findProgramAddressSync([Buffer.from("whitelist"), controllerPubkey.toBuffer()], program.programId);
+            const [eventPda] = PublicKey.findProgramAddressSync([Buffer.from("event"), eventId.toBuffer('le', 8)], program.programId);
             
             const tiersInput = parsedOnChainData.tiers.map(tier => {
                 const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
@@ -1313,7 +1313,7 @@ app.post(
                     eventAccount: eventPda,
                     controller: controllerPubkey,      // ✅ O dono do evento é o usuário do frontend
                     payer: payerKeypair.publicKey,      // ✅ A taxa é paga pela carteira da API
-                    systemProgram: web3.SystemProgram.programId,
+                    systemProgram: SystemProgram.programId,
                 })
                 .rpc();
 
@@ -1330,6 +1330,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -300,14 +300,14 @@ app.post('/api/generate-payment-qr', async (req, res) => {
     } = req.body;
 
     try {
-        // ✅ 1. PRIMEIRO: Buscar dados do evento para pegar o organizador
+        // ✅ 1. BUSCAR DADOS DO EVENTO E TAXA
         console.log(`[QR] Iniciando geração de QR para evento: ${eventAddress}`);
         const eventPubkey = new PublicKey(eventAddress);
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const organizerAddress = eventAccount.controller;
         console.log(`[QR] Organizador do evento: ${organizerAddress.toString()}`);
 
-        // ✅ 2. BUSCAR TAXA DO ORGANIZADOR
+        // ✅ 2. BUSCAR TAXA DO ORGANIZADOR (com fallback)
         let platformFeeBps = 150; // taxa padrão 1.5%
         try {
             const [whitelistPda] = PublicKey.findProgramAddressSync(
@@ -323,28 +323,23 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             console.warn(`[QR] Organizador não encontrado na whitelist, usando taxa padrão: ${platformFeeBps} bps`);
         }
 
-        // ✅ 3. CALCULAR VALORES DETALHADOS
-        const platformFeePercentage = platformFeeBps / 100; // Converte para porcentagem
-        const baseAmount = priceBRLCents / 100; // Preço base em Reais
-        const serviceFee = (priceBRLCents * platformFeeBps) / 10000; // Taxa em Reais
-        const totalAmount = baseAmount + serviceFee; // Total a ser pago
+        // ✅ 3. CALCULAR VALORES
+        const platformFeePercentage = platformFeeBps / 100;
+        const baseAmount = priceBRLCents / 100;
+        const serviceFee = (priceBRLCents * platformFeeBps) / 10000;
+        const totalAmount = baseAmount + serviceFee;
 
         console.log('=== 🧮 DETALHES DO CÁLCULO ===');
-        console.log(`Preço base do ingresso: R$ ${baseAmount.toFixed(2)}`);
+        console.log(`Preço base: R$ ${baseAmount.toFixed(2)}`);
         console.log(`Taxa de serviço (${platformFeePercentage}%): R$ ${serviceFee.toFixed(2)}`);
-        console.log(`Total a pagar: R$ ${totalAmount.toFixed(2)}`);
+        console.log(`Total: R$ ${totalAmount.toFixed(2)}`);
         console.log('==============================');
 
-        // ✅ 4. VALIDAÇÃO DOS VALORES
+        // ✅ 4. VALIDAÇÕES
         if (isNaN(totalAmount) || totalAmount <= 0) {
             return res.status(400).json({
                 success: false,
-                error: 'Valor do pagamento inválido',
-                debug: {
-                    priceBRLCents,
-                    platformFeeBps,
-                    calculatedTotal: totalAmount
-                }
+                error: 'Valor do pagamento inválido'
             });
         }
 
@@ -355,46 +350,51 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             });
         }
 
-        // ✅ 5. CONFIGURAÇÃO MERCADO PAGO
+        // ✅ 5. CONFIGURAÇÃO MERCADO PAGO CORRIGIDA
         const description = `Ingresso: ${eventName} - ${tierName}`;
         const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
 
-        // Obter URLs base
         const API_URL = process.env.API_URL || 'https://gasless-api-ke68.onrender.com';
-        const FRONTEND_URL = process.env.FRONTEND_URL || 'https://seu-frontend.onrender.com';
+        const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
         const cleanApiUrl = API_URL.replace(/\/$/, '');
         const cleanFrontendUrl = FRONTEND_URL.replace(/\/$/, '');
 
         console.log(`[QR] Criando preferência no Mercado Pago...`);
         console.log(`[QR] Valor total: R$ ${totalAmount.toFixed(2)}`);
-        console.log(`[QR] Descrição: ${description}`);
-        console.log(`[QR] External Reference: ${externalReference}`);
 
-        // ✅ 6. CRIAR PREFERÊNCIA NO MERCADO PAGO
+        // ✅ CORREÇÃO: Configuração otimizada para PIX
         const preferenceData = {
             items: [
                 {
+                    id: externalReference,
                     title: description,
-                    unit_price: totalAmount, // ✅ ENVIANDO VALOR TOTAL (base + taxa)
+                    description: `Ingresso para ${eventName}`,
+                    unit_price: totalAmount,
                     quantity: 1,
                     currency_id: 'BRL',
                 }
             ],
+            // ✅ CORREÇÃO: Configuração específica para PIX
             payment_methods: {
-                excluded_payment_methods: [
-                    { id: 'credit_card' },
-                    { id: 'debit_card' },
-                    { id: 'bank_transfer' }
-                ],
                 excluded_payment_types: [
                     { id: 'credit_card' },
                     { id: 'debit_card' },
+                    { id: 'ticket' },
                     { id: 'bank_transfer' }
                 ],
+                default_payment_method_id: 'pix',
                 installments: 1
             },
-            statement_descriptor: `EVENTO-${eventName.substring(0, 10)}`,
+            // ✅ CORREÇÃO: Habilitar PIX explicitamente
+            point_of_interaction: {
+                type: 'PIX'
+            },
+            payer: {
+                name: userName,
+                email: userEmail,
+            },
+            statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`,
             external_reference: externalReference,
             notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
             expires: true,
@@ -405,34 +405,44 @@ app.post('/api/generate-payment-qr', async (req, res) => {
                 failure: `${cleanFrontendUrl}/payment/failure`, 
                 pending: `${cleanFrontendUrl}/payment/pending`
             },
+            auto_return: 'approved',
         };
 
-        console.log('[QR] Preference data:', JSON.stringify(preferenceData, null, 2));
+        console.log('[QR] Preference data enviada ao Mercado Pago');
 
-        // ✅ 7. CHAMAR API MERCADO PAGO
+        // ✅ 6. CHAMADA AO MERCADO PAGO
         const preferenceClient = new Preference(client);
         const response = await preferenceClient.create({ body: preferenceData });
         
-        // ✅ 8. EXTRAIR DADOS DO QR CODE
+        // ✅ CORREÇÃO: Log completo da resposta para debug
+        console.log('[QR] Resposta completa do Mercado Pago:');
+        console.log('- point_of_interaction:', response.point_of_interaction);
+        console.log('- transaction_data:', response.point_of_interaction?.transaction_data);
+        console.log('- init_point:', response.init_point);
+        console.log('- sandbox_init_point:', response.sandbox_init_point);
+
+        // ✅ CORREÇÃO: Extrair dados do QR Code de forma mais robusta
         const qrCode = response.point_of_interaction?.transaction_data?.qr_code;
         const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
         
-        // ✅ VALIDAÇÃO: Garantir que temos os dados do QR code
-        if (!qrCode || !qrCodeBase64) {
-            console.warn('[QR] Dados do QR code não encontrados na resposta:', {
-                point_of_interaction: response.point_of_interaction,
-                transaction_data: response.point_of_interaction?.transaction_data
-            });
+        // ✅ CORREÇÃO: Se não tiver QR code, tentar fallback para a URL de pagamento
+        let paymentUrl = response.init_point || response.sandbox_init_point;
+        
+        if (!qrCode && !qrCodeBase64) {
+            console.warn('[QR] QR Code não gerado pelo Mercado Pago. Verifique:');
+            console.warn('1. Se a conta Mercado Pago está configurada para PIX');
+            console.warn('2. Se o valor é aceito para PIX');
+            console.warn('3. Usando URL de fallback:', paymentUrl);
         } else {
             console.log('[QR] QR code gerado com sucesso!');
         }
 
-        // ✅ 9. SALVAR SESSÃO DE PAGAMENTO
+        // ✅ 7. SALVAR SESSÃO DE PAGAMENTO
         activePaymentSessions.set(externalReference, {
             eventAddress,
             tierIndex,
             priceBRLCents,
-            platformFeeBps, // ✅ SALVANDO A TAXA APLICADA
+            platformFeeBps,
             formData,
             userName,
             userEmail,
@@ -441,7 +451,6 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             preferenceId: response.id,
             createdAt: new Date(),
             status: 'pending',
-            // ✅ SALVANDO OS VALORES CALCULADOS
             amountDetails: {
                 baseAmount,
                 serviceFee,
@@ -452,7 +461,7 @@ app.post('/api/generate-payment-qr', async (req, res) => {
 
         console.log(`[QR] Sessão de pagamento salva: ${externalReference}`);
 
-        // ✅ 10. CONFIGURAR EXPIRAÇÃO (15 minutos)
+        // ✅ 8. CONFIGURAR EXPIRAÇÃO
         setTimeout(() => {
             if (activePaymentSessions.has(externalReference)) {
                 const session = activePaymentSessions.get(externalReference);
@@ -464,52 +473,49 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             }
         }, 15 * 60 * 1000);
 
-        // ✅ 11. RETORNAR RESPOSTA COMPLETA
+        // ✅ 9. RETORNAR RESPOSTA CORRIGIDA
         const responseData = {
             success: true,
             qrCode: qrCode,
             qrCodeBase64: qrCodeBase64,
             externalReference: externalReference,
-            ticketUrl: response.init_point,
+            ticketUrl: paymentUrl, // ✅ URL de fallback
             preferenceId: response.id,
             expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            // ✅ DADOS DETALHADOS PARA O FRONTEND
             amountDetails: {
                 baseAmount: baseAmount,
                 serviceFee: serviceFee,
                 serviceFeeRate: platformFeePercentage,
                 totalAmount: totalAmount
             },
-            // ✅ DEBUG (apenas em desenvolvimento)
-            debug: process.env.NODE_ENV === 'development' ? {
+            // ✅ CORREÇÃO: Incluir informações de debug
+            paymentInfo: {
                 hasQrCode: !!qrCode,
                 hasQrCodeBase64: !!qrCodeBase64,
-                organizerAddress: organizerAddress.toString(),
-                platformFeeBps: platformFeeBps,
-                responseStructure: {
-                    point_of_interaction: !!response.point_of_interaction,
-                    transaction_data: !!response.point_of_interaction?.transaction_data
-                }
-            } : undefined
+                paymentUrl: !!paymentUrl
+            }
         };
 
-        console.log(`[QR] ✅ QR code gerado com sucesso para ${userName}`);
-        console.log(`[QR] Total: R$ ${totalAmount.toFixed(2)} (Ingresso: R$ ${baseAmount.toFixed(2)} + Taxa: R$ ${serviceFee.toFixed(2)})`);
+        console.log(`[QR] ✅ Resposta preparada para ${userName}`);
+        console.log(`[QR] QR Code disponível: ${!!qrCodeBase64}`);
+        console.log(`[QR] URL de pagamento: ${paymentUrl}`);
 
         res.status(200).json(responseData);
 
     } catch (error) {
         console.error('❌ Erro ao gerar QR code do Mercado Pago:', error);
-        console.error('❌ Detalhes do erro:', error.response?.data || error.message);
         
-        // ✅ RETORNO DE ERRO DETALHADO
+        // ✅ CORREÇÃO: Log mais detalhado do erro
+        if (error.response) {
+            console.error('❌ Resposta de erro do Mercado Pago:', error.response.data);
+        }
+        
         res.status(500).json({
             success: false,
             error: 'Falha ao gerar QR code de pagamento',
             details: error.message,
             debug: process.env.NODE_ENV === 'development' ? {
-                apiUrl: process.env.API_URL,
-                frontendUrl: process.env.FRONTEND_URL,
+                message: error.response?.data?.message || 'Sem detalhes adicionais',
                 stack: error.stack
             } : undefined
         });
@@ -1614,6 +1620,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

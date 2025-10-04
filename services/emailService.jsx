@@ -12,10 +12,10 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const BRAND_LOGO_BASE64 = 'https://red-obedient-stingray-854.mypinata.cloud/ipfs/bafkreih7ofsa246z5vnjvrol6xk5tpj4zys42tcaotxq7tp7ptgraalrya';
 
 // Função auxiliar para gerar QR Code (mantida)
-async function createQrCodeImage(mintAddress) {
+async function createQrCodeImage(registrationId) {
     try {
-        console.log(` -> Gerando QR Code para: ${mintAddress}`);
-        const qrCodeDataUrl = await QRCode.toDataURL(mintAddress, {
+        console.log(` -> Gerando QR Code para: ${registrationId}`);
+        const qrCodeDataUrl = await QRCode.toDataURL(registrationId, {
             width: 150,
             margin: 1,
             color: { dark: '#000000', light: '#FFFFFF' }
@@ -51,7 +51,7 @@ const formatFullAddress = (location) => {
 async function generateTicketPDF(ticketData) {
     try {
         console.log(' -> Gerando QR Code para o novo PDF...');
-        const qrCodeImage = await createQrCodeImage(ticketData.mintAddress);
+        const qrCodeImage = await createQrCodeImage(ticketData.registrationId);
 
         console.log(' -> Renderizando componente PDF para buffer...');
         

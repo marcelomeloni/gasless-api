@@ -85,6 +85,27 @@ console.log(`[+] Mercado Pago configured.`);
 
 // --- PAYMENT SESSIONS STORAGE ---
 const activePaymentSessions = new Map();
+async function getOrganizerFee(eventAddress) {
+    try {
+        const eventPubkey = new PublicKey(eventAddress);
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const organizerAddress = eventAccount.controller;
+        
+        // Buscar a whitelist do organizador para pegar a taxa
+        const [whitelistPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("whitelist"), organizerAddress.toBuffer()], 
+            program.programId
+        );
+        
+        const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
+        // A taxa está em "basis points" (ex: 150 = 1.5%, 200 = 2%)
+        return whitelistAccount.platformFeeBps; 
+        
+    } catch (error) {
+        console.error("Erro ao buscar taxa do organizador, usando padrão:", error);
+        return 150; // Taxa padrão de 1.5% em caso de erro
+    }
+}
 
 // --- SUPABASE HELPER FUNCTION ---
 const upsertUserInSupabase = async (userData) => {
@@ -279,7 +300,62 @@ app.post('/api/generate-payment-qr', async (req, res) => {
     } = req.body;
 
     try {
-        const amount = parseFloat((priceBRLCents / 100).toFixed(2));
+        // ✅ 1. PRIMEIRO: Buscar dados do evento para pegar o organizador
+        console.log(`[QR] Iniciando geração de QR para evento: ${eventAddress}`);
+        const eventPubkey = new PublicKey(eventAddress);
+        const eventAccount = await program.account.event.fetch(eventPubkey);
+        const organizerAddress = eventAccount.controller;
+        console.log(`[QR] Organizador do evento: ${organizerAddress.toString()}`);
+
+        // ✅ 2. BUSCAR TAXA DO ORGANIZADOR
+        let platformFeeBps = 150; // taxa padrão 1.5%
+        try {
+            const [whitelistPda] = PublicKey.findProgramAddressSync(
+                [Buffer.from("whitelist"), organizerAddress.toBuffer()], 
+                program.programId
+            );
+            console.log(`[QR] Buscando whitelist PDA: ${whitelistPda.toString()}`);
+            
+            const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
+            platformFeeBps = whitelistAccount.platformFeeBps;
+            console.log(`[QR] Taxa do organizador encontrada: ${platformFeeBps} bps`);
+        } catch (error) {
+            console.warn(`[QR] Organizador não encontrado na whitelist, usando taxa padrão: ${platformFeeBps} bps`);
+        }
+
+        // ✅ 3. CALCULAR VALORES DETALHADOS
+        const platformFeePercentage = platformFeeBps / 100; // Converte para porcentagem
+        const baseAmount = priceBRLCents / 100; // Preço base em Reais
+        const serviceFee = (priceBRLCents * platformFeeBps) / 10000; // Taxa em Reais
+        const totalAmount = baseAmount + serviceFee; // Total a ser pago
+
+        console.log('=== 🧮 DETALHES DO CÁLCULO ===');
+        console.log(`Preço base do ingresso: R$ ${baseAmount.toFixed(2)}`);
+        console.log(`Taxa de serviço (${platformFeePercentage}%): R$ ${serviceFee.toFixed(2)}`);
+        console.log(`Total a pagar: R$ ${totalAmount.toFixed(2)}`);
+        console.log('==============================');
+
+        // ✅ 4. VALIDAÇÃO DOS VALORES
+        if (isNaN(totalAmount) || totalAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Valor do pagamento inválido',
+                debug: {
+                    priceBRLCents,
+                    platformFeeBps,
+                    calculatedTotal: totalAmount
+                }
+            });
+        }
+
+        if (totalAmount < 0.01) {
+            return res.status(400).json({
+                success: false,
+                error: 'Valor mínimo do pagamento é R$ 0,01'
+            });
+        }
+
+        // ✅ 5. CONFIGURAÇÃO MERCADO PAGO
         const description = `Ingresso: ${eventName} - ${tierName}`;
         const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
 
@@ -290,12 +366,17 @@ app.post('/api/generate-payment-qr', async (req, res) => {
         const cleanApiUrl = API_URL.replace(/\/$/, '');
         const cleanFrontendUrl = FRONTEND_URL.replace(/\/$/, '');
 
-        // Create Mercado Pago preference data for QR code
+        console.log(`[QR] Criando preferência no Mercado Pago...`);
+        console.log(`[QR] Valor total: R$ ${totalAmount.toFixed(2)}`);
+        console.log(`[QR] Descrição: ${description}`);
+        console.log(`[QR] External Reference: ${externalReference}`);
+
+        // ✅ 6. CRIAR PREFERÊNCIA NO MERCADO PAGO
         const preferenceData = {
             items: [
                 {
                     title: description,
-                    unit_price: amount,
+                    unit_price: totalAmount, // ✅ ENVIANDO VALOR TOTAL (base + taxa)
                     quantity: 1,
                     currency_id: 'BRL',
                 }
@@ -326,31 +407,32 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             },
         };
 
-        console.log('Preference data:', JSON.stringify(preferenceData, null, 2));
+        console.log('[QR] Preference data:', JSON.stringify(preferenceData, null, 2));
 
+        // ✅ 7. CHAMAR API MERCADO PAGO
         const preferenceClient = new Preference(client);
         const response = await preferenceClient.create({ body: preferenceData });
         
-        // ✅ CORREÇÃO: Verificar a estrutura real da resposta do Mercado Pago
-        console.log('Mercado Pago response:', JSON.stringify(response, null, 2));
-
-        // Extrair dados do QR code da resposta
+        // ✅ 8. EXTRAIR DADOS DO QR CODE
         const qrCode = response.point_of_interaction?.transaction_data?.qr_code;
         const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
         
         // ✅ VALIDAÇÃO: Garantir que temos os dados do QR code
         if (!qrCode || !qrCodeBase64) {
-            console.warn('QR code data not found in Mercado Pago response:', {
+            console.warn('[QR] Dados do QR code não encontrados na resposta:', {
                 point_of_interaction: response.point_of_interaction,
                 transaction_data: response.point_of_interaction?.transaction_data
             });
+        } else {
+            console.log('[QR] QR code gerado com sucesso!');
         }
 
-        // Store payment session
+        // ✅ 9. SALVAR SESSÃO DE PAGAMENTO
         activePaymentSessions.set(externalReference, {
             eventAddress,
             tierIndex,
             priceBRLCents,
+            platformFeeBps, // ✅ SALVANDO A TAXA APLICADA
             formData,
             userName,
             userEmail,
@@ -358,22 +440,32 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             eventName,
             preferenceId: response.id,
             createdAt: new Date(),
-            status: 'pending'
+            status: 'pending',
+            // ✅ SALVANDO OS VALORES CALCULADOS
+            amountDetails: {
+                baseAmount,
+                serviceFee,
+                serviceFeeRate: platformFeePercentage,
+                totalAmount
+            }
         });
 
-        // Set expiration timeout (15 minutes)
+        console.log(`[QR] Sessão de pagamento salva: ${externalReference}`);
+
+        // ✅ 10. CONFIGURAR EXPIRAÇÃO (15 minutos)
         setTimeout(() => {
             if (activePaymentSessions.has(externalReference)) {
                 const session = activePaymentSessions.get(externalReference);
                 if (session.status === 'pending') {
                     session.status = 'expired';
                     activePaymentSessions.set(externalReference, session);
+                    console.log(`[QR] Sessão expirada: ${externalReference}`);
                 }
             }
         }, 15 * 60 * 1000);
 
-        // ✅ CORREÇÃO: Garantir que a resposta tenha a estrutura esperada
-        res.status(200).json({
+        // ✅ 11. RETORNAR RESPOSTA COMPLETA
+        const responseData = {
             success: true,
             qrCode: qrCode,
             qrCodeBase64: qrCodeBase64,
@@ -381,29 +473,44 @@ app.post('/api/generate-payment-qr', async (req, res) => {
             ticketUrl: response.init_point,
             preferenceId: response.id,
             expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            amount: amount,
-            // ✅ DEBUG: Incluir dados de debug em desenvolvimento
+            // ✅ DADOS DETALHADOS PARA O FRONTEND
+            amountDetails: {
+                baseAmount: baseAmount,
+                serviceFee: serviceFee,
+                serviceFeeRate: platformFeePercentage,
+                totalAmount: totalAmount
+            },
+            // ✅ DEBUG (apenas em desenvolvimento)
             debug: process.env.NODE_ENV === 'development' ? {
                 hasQrCode: !!qrCode,
                 hasQrCodeBase64: !!qrCodeBase64,
+                organizerAddress: organizerAddress.toString(),
+                platformFeeBps: platformFeeBps,
                 responseStructure: {
                     point_of_interaction: !!response.point_of_interaction,
                     transaction_data: !!response.point_of_interaction?.transaction_data
                 }
             } : undefined
-        });
+        };
+
+        console.log(`[QR] ✅ QR code gerado com sucesso para ${userName}`);
+        console.log(`[QR] Total: R$ ${totalAmount.toFixed(2)} (Ingresso: R$ ${baseAmount.toFixed(2)} + Taxa: R$ ${serviceFee.toFixed(2)})`);
+
+        res.status(200).json(responseData);
 
     } catch (error) {
-        console.error('Error generating Mercado Pago QR code:', error);
-        console.error('Error details:', error.response?.data || error.message);
+        console.error('❌ Erro ao gerar QR code do Mercado Pago:', error);
+        console.error('❌ Detalhes do erro:', error.response?.data || error.message);
         
+        // ✅ RETORNO DE ERRO DETALHADO
         res.status(500).json({
             success: false,
-            error: 'Failed to generate payment QR code',
+            error: 'Falha ao gerar QR code de pagamento',
             details: error.message,
             debug: process.env.NODE_ENV === 'development' ? {
                 apiUrl: process.env.API_URL,
-                frontendUrl: process.env.FRONTEND_URL
+                frontendUrl: process.env.FRONTEND_URL,
+                stack: error.stack
             } : undefined
         });
     }
@@ -486,18 +593,18 @@ app.post('/api/process-paid-ticket', async (req, res) => {
         if (!paymentSession) {
             return res.status(404).json({
                 success: false,
-                error: 'Payment session not found'
+                error: 'Sessão de pagamento não encontrada'
             });
         }
 
-        // Verify payment is actually completed
+        // ✅ VERIFICAR SE O PAGAMENTO FOI REALMENTE APROVADO
         const filters = {
             external_reference: externalReference,
             status: 'approved'
         };
 
         const payment = new Payment(client);
-const searchResult = await payment.search({
+        const searchResult = await payment.search({
             qs: filters
         });
 
@@ -506,20 +613,22 @@ const searchResult = await payment.search({
         if (approvedPayments.length === 0) {
             return res.status(400).json({
                 success: false,
-                error: 'Payment not completed or verified',
+                error: 'Pagamento não concluído ou não verificado',
                 status: 'pending'
             });
         }
 
-        // Update session status
+        // ✅ ATUALIZAR STATUS DA SESSÃO
         paymentSession.status = 'paid';
         paymentSession.paymentId = approvedPayments[0].id;
         activePaymentSessions.set(externalReference, paymentSession);
 
-        // Process ticket minting using existing logic
+        console.log(`[💰] Processando ingresso pago para: ${paymentSession.userName}`);
+        console.log(`[💰] Valor pago: R$ ${paymentSession.amountDetails?.totalAmount || 'N/A'}`);
+
+        // ✅ PROCESSAR MINT DO INGRESSO
         const { eventAddress, tierIndex, formData, userEmail, userName } = paymentSession;
         
-        // Call your existing minting logic here
         const mintResponse = await processPaidTicketForNewUser({
             eventAddress,
             tierIndex,
@@ -529,20 +638,30 @@ const searchResult = await payment.search({
             userName
         });
 
-        // Remove session after successful processing
+        // ✅ REMOVER SESSÃO APÓS SUCESSO
         activePaymentSessions.delete(externalReference);
+
+        console.log(`[🎉] Ingresso pago processado com sucesso!`);
+        console.log(`[🎉] NFT Mint: ${mintResponse.mintAddress}`);
+        console.log(`[🎉] Carteira do usuário: ${mintResponse.publicKey}`);
 
         res.status(200).json({
             success: true,
-            message: 'Payment verified and ticket processed successfully',
-            ticketData: mintResponse
+            message: 'Pagamento verificado e ingresso processado com sucesso',
+            ticketData: mintResponse,
+            // ✅ INCLUIR DETALHES DO VALOR PAGO NA RESPOSTA
+            paymentDetails: {
+                amountPaid: paymentSession.amountDetails?.totalAmount,
+                baseAmount: paymentSession.amountDetails?.baseAmount,
+                serviceFee: paymentSession.amountDetails?.serviceFee
+            }
         });
 
     } catch (error) {
-        console.error('Error processing paid ticket:', error);
+        console.error('❌ Erro ao processar ingresso pago:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to process paid ticket',
+            error: 'Falha ao processar ingresso pago',
             details: error.message
         });
     }
@@ -1495,6 +1614,7 @@ app.post(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

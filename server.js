@@ -1565,11 +1565,21 @@ transaction.sign(payerKeypair);
 
 // ✅ CORREÇÃO: Usar o método correto do Solana Web3.js
 console.log(' -> Enviando transação para a blockchain...');
-const signature = await sendAndConfirmRawTransaction(
-    program.provider.connection,
+const signature = await program.provider.connection.sendRawTransaction(
     transaction.serialize(),
-    { commitment: 'confirmed' }
+    { skipPreflight: false, preflightCommitment: 'confirmed' }
 );
+
+// Then confirm the transaction
+const confirmation = await program.provider.connection.confirmTransaction({
+    signature,
+    blockhash,
+    lastValidBlockHeight,
+}, 'confirmed');
+
+if (confirmation.value.err) {
+    throw new Error(`Transaction failed: ${confirmation.value.err}`);
+}
 
                 console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
                 
@@ -1618,6 +1628,7 @@ const signature = await sendAndConfirmRawTransaction(
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

@@ -223,6 +223,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
                     seedPhrase: mnemonic, 
                     privateKey: privateKey, 
                     eventImage: metadata.image,
+                    registrationId: registrationId,
                     // ...outros dados do metadata...
                 };
                 sendTicketEmail({ name, email }, ticketDataForEmail);
@@ -385,6 +386,7 @@ app.post('/mint-for-existing-user', async (req, res) => {
                         organizerName: metadata.organizer.name, 
                         organizerLogo: metadata.organizer.organizerLogo, 
                         organizerWebsite: metadata.organizer.website,
+                        registrationId: registrationId,
                     };
                     
                     sendTicketEmail({ name, email }, ticketDataForEmail);
@@ -789,6 +791,7 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
+
 
 
 

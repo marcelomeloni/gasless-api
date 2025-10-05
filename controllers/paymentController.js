@@ -160,45 +160,45 @@ export const generatePaymentQR = async (req, res) => {
         });
 
         console.log(`[QR📱] Criando preferência no Mercado Pago...`);
-        const preferenceData = {
-            items: [
-                {
-                    id: externalReference,
-                    title: description,
-                    description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
-                    unit_price: totalAmount,
-                    quantity: 1,
-                    currency_id: 'BRL',
-                }
-            ],
-            payment_methods: {
-                excluded_payment_types: [
-                    { id: 'credit_card' },
-                    { id: 'debit_card' },
-                    { id: 'ticket' },
-                    { id: 'bank_transfer' }
-                ],
-                default_payment_method_id: 'pix',
-                installments: 1
-            },
-            point_of_interaction: {
-                type: 'PIX'
-            },
-            payer: {
-                name: userName,
-                email: userEmail,
-            },
-            statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`,
-            external_reference: externalReference,
-            notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
-            expires: true,
-            expiration_date_from: new Date().toISOString(),
-            expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            back_urls: {
-                success: `${cleanFrontendUrl}/payment/success`,
-            },
-            auto_return: 'approved',
-        };
+       const preferenceData = {
+    items: [
+        {
+            id: externalReference,
+            title: description,
+            description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
+            unit_price: totalAmount,
+            quantity: 1,
+            currency_id: 'BRL',
+        }
+    ],
+    payment_methods: {
+        excluded_payment_types: [
+            { id: 'credit_card' },
+            { id: 'debit_card' },
+            { id: 'ticket' },
+            { id: 'bank_transfer' }
+        ],
+      
+        installments: 1
+    },
+    point_of_interaction: {
+        type: 'PIX'  
+    },
+    payer: {
+        name: userName,
+        email: userEmail,
+    },
+    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`,
+    external_reference: externalReference,
+    notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
+    expires: true,
+    expiration_date_from: new Date().toISOString(),
+    expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    back_urls: {
+        success: `${cleanFrontendUrl}/payment/success`,
+    },
+    auto_return: 'approved',
+};
 
         console.log(`[QR📱] Dados da preferência enviada:`, JSON.stringify(preferenceData, null, 2));
 

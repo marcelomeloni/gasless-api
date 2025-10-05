@@ -3,6 +3,7 @@ import { uploadToPinata, uploadJSONToPinata } from '../services/pinataService.js
 import anchor from '@coral-xyz/anchor';
 import axios from 'axios';
 import FormData from 'form-data';
+import { deriveUserKeypair } from '../services/walletDerivationService.js';
 export const createGaslessEvent = async (req, res) => {
     console.log('[+] Recebida requisição para criar evento gasless...');
 
@@ -152,38 +153,60 @@ export const createFullEvent = async (req, res) => {
     console.log('[+] Recebida requisição para criar evento completo.');
 
     try {
-        const { offChainData, onChainData, controller } = req.body;
-        if (!offChainData || !onChainData || !controller) {
-            return res.status(400).json({ success: false, error: "Dados do formulário ou do controlador ausentes." });
+        const { offChainData, onChainData, controller, userLoginData } = req.body;
+        
+        if (!offChainData || !onChainData || !controller || !userLoginData) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Dados do formulário, controlador ou credenciais de login ausentes." 
+            });
         }
         
         const parsedOffChainData = JSON.parse(offChainData);
         const parsedOnChainData = JSON.parse(onChainData);
+        const parsedUserLoginData = JSON.parse(userLoginData);
         const controllerPubkey = new PublicKey(controller);
         const files = req.files;
 
+        console.log(' -> Derivando keypair do usuário no backend...');
+        
+        // Derivar a keypair do usuário no backend usando os mesmos dados de login
+        const userKeypair = await deriveUserKeypair(parsedUserLoginData);
+        
+        // Verificar se o publicKey derivado bate com o controller
+        const derivedPublicKey = userKeypair.publicKey.toString();
+        const requestedPublicKey = controllerPubkey.toString();
+        
+        if (derivedPublicKey !== requestedPublicKey) {
+            console.error(` ❌ Public key mismatch: ${derivedPublicKey} vs ${requestedPublicKey}`);
+            return res.status(400).json({
+                success: false,
+                error: "A chave pública derivada não corresponde ao controlador fornecido."
+            });
+        }
+
+        console.log(` ✅ Keypair do usuário derivado: ${derivedPublicKey}`);
+
+        // Processar uploads de arquivos
         let imageUrl = parsedOffChainData.image;
         let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
 
-        // Upload da imagem principal
         if (files.image?.[0]) {
             console.log(' -> Fazendo upload da imagem do evento...');
             imageUrl = await uploadToPinata(files.image[0]);
             console.log(` -> Imagem do evento enviada: ${imageUrl}`);
         } else {
-            console.error('❌ Nenhuma imagem foi recebida no upload');
             return res.status(400).json({ 
                 success: false, 
                 error: "Imagem principal do evento é obrigatória." 
             });
         }
 
-        // Upload do logo do organizador (opcional)
         if (files.organizerLogo?.[0]) {
             console.log(' -> Fazendo upload do logo do organizador...');
             organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
             console.log(` -> Logo enviado: ${organizerLogoUrl}`);
-        } else if (!organizerLogoUrl || organizerLogoUrl.startsWith('[Arquivo:')) {
+        } else {
             organizerLogoUrl = '';
         }
 
@@ -204,10 +227,9 @@ export const createFullEvent = async (req, res) => {
                 }
             },
             createdAt: new Date().toISOString(),
-            createdBy: controllerPubkey.toString()
+            createdBy: derivedPublicKey // Usar a chave derivada
         };
         
-        // Upload dos metadados para IPFS
         console.log(' -> Fazendo upload do JSON de metadados...');
         const metadataUrl = await uploadJSONToPinata(finalMetadata);
         console.log(` -> Metadados enviados: ${metadataUrl}`);
@@ -215,9 +237,9 @@ export const createFullEvent = async (req, res) => {
         console.log(' -> Preparando transação on-chain...');
         const eventId = new anchor.BN(Date.now());
         
-        // Encontrar PDAs
+        // Encontrar PDAs - IMPORTANTE: usar a chave do usuário como authority
         const [whitelistPda] = PublicKey.findProgramAddressSync(
-            [Buffer.from("whitelist"), controllerPubkey.toBuffer()], 
+            [Buffer.from("whitelist"), userKeypair.publicKey.toBuffer()], 
             program.programId
         );
         const [eventPda] = PublicKey.findProgramAddressSync(
@@ -235,7 +257,7 @@ export const createFullEvent = async (req, res) => {
             };
         });
 
-        // Validar datas de venda
+        // Validar datas
         const salesStartDate = new Date(parsedOnChainData.salesStartDate);
         const salesEndDate = new Date(parsedOnChainData.salesEndDate);
         
@@ -247,14 +269,10 @@ export const createFullEvent = async (req, res) => {
         }
 
         console.log(' -> Construindo transação...');
-        
-        // Obter o blockhash mais recente
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
 
-        // **MÉTODO CORRETO: Usar program.methods().rpc() para assinatura automática**
-        console.log(' -> Enviando transação para a blockchain (método automático)...');
-        
-        const signature = await program.methods
+        // Construir a transação
+        const tx = await program.methods
             .createEvent(
                 eventId, 
                 metadataUrl, 
@@ -267,27 +285,47 @@ export const createFullEvent = async (req, res) => {
             .accounts({
                 whitelistAccount: whitelistPda,
                 eventAccount: eventPda,
-                controller: controllerPubkey,
+                controller: userKeypair.publicKey, // ← Authority é o usuário!
                 payer: payerKeypair.publicKey,
                 systemProgram: SystemProgram.programId,
             })
-            .rpc({
-                commitment: 'confirmed',
-                skipPreflight: false
-            });
+            .transaction();
+
+        // Configurar transação
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = payerKeypair.publicKey;
+
+        console.log(' -> Assinando transação com o USUÁRIO (authority) e PAYER (taxas)...');
+        
+        // **ASSINAR COM AMBAS: usuário (authority do evento) e payer (para taxas)**
+        tx.sign(userKeypair, payerKeypair);
+
+        console.log(' -> Enviando transação para a blockchain...');
+        
+        const serializedTx = tx.serialize();
+        const signature = await connection.sendRawTransaction(serializedTx, {
+            skipPreflight: false,
+            preflightCommitment: 'confirmed',
+            maxRetries: 3
+        });
 
         console.log(` -> Transação enviada: ${signature}`);
         console.log(' -> Aguardando confirmação...');
 
         // Aguardar confirmação
-        await connection.confirmTransaction({
+        const confirmation = await connection.confirmTransaction({
             signature,
             blockhash,
             lastValidBlockHeight,
         }, 'confirmed');
 
+        if (confirmation.value.err) {
+            throw new Error(`Transação falhou: ${JSON.stringify(confirmation.value.err)}`);
+        }
+
         console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
-        console.log(`[🎉] Transação confirmada! Evento criado em: ${eventPda.toString()}`);
+        console.log(`[🎉] Authority do evento: ${userKeypair.publicKey.toString()}`);
+        console.log(`[🎉] Evento criado em: ${eventPda.toString()}`);
 
         res.status(200).json({ 
             success: true, 
@@ -295,31 +333,20 @@ export const createFullEvent = async (req, res) => {
             eventAddress: eventPda.toString(),
             eventId: eventId.toString(),
             metadataUrl: metadataUrl,
+            authority: userKeypair.publicKey.toString(), // ← Authority REAL é o usuário!
             message: "Evento criado automaticamente com sucesso!" 
         });
 
     } catch (error) {
         console.error("❌ Erro no processo de criação completo do evento:", error);
         
-        // Log detalhado para debugging
         if (error.logs) {
             console.error('Logs da transação:', error.logs);
         }
         
-        if (error.message?.includes('Account does not exist')) {
-            return res.status(400).json({
-                success: false,
-                error: "Conta do usuário não encontrada na blockchain. Certifique-se de que a carteira possui algum SOL."
-            });
-        }
+        // Log mais detalhado
+        console.error('Stack trace:', error.stack);
         
-        if (error.message?.includes('insufficient funds')) {
-            return res.status(400).json({
-                success: false,
-                error: "Fundos insuficientes na carteira do sistema para criar o evento."
-            });
-        }
-
         res.status(500).json({ 
             success: false, 
             error: error.message || 'Ocorreu um erro interno no servidor.',

@@ -9,7 +9,32 @@ const client = new MercadoPagoConfig({
 });
 
 export const activePaymentSessions = new Map();
-
+const generateFallbackQR = async (preferenceId, totalAmount, description) => {
+    try {
+        // Tentar buscar dados atualizados da preferência
+        const preferenceClient = new Preference(client);
+        const updatedPreference = await preferenceClient.get({ id: preferenceId });
+        
+        if (updatedPreference.point_of_interaction?.transaction_data?.qr_code) {
+            return {
+                qrCode: updatedPreference.point_of_interaction.transaction_data.qr_code,
+                qrCodeBase64: updatedPreference.point_of_interaction.transaction_data.qr_code_base64
+            };
+        }
+        
+        // Se ainda não tiver QR code, usar serviço externo
+        const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=${preferenceId}`)}`;
+        
+        return {
+            qrCode: `https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=${preferenceId}`,
+            qrCodeBase64: null,
+            qrCodeImageUrl: qrCodeUrl
+        };
+    } catch (error) {
+        console.error('Erro ao gerar fallback QR:', error);
+        return null;
+    }
+};
 export const getOrganizerFee = async (eventAddress) => {
     console.log(`[💰getOrganizerFee] Iniciando busca de taxa para evento: ${eventAddress}`);
     
@@ -160,53 +185,66 @@ console.log('==============================');
         });
 
         console.log(`[QR📱] Criando preferência no Mercado Pago...`);
-     const preferenceData = {
-    items: [
-        {
-            id: externalReference,
-            title: description,
-            description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
-            unit_price: totalAmount, // Já está em reais
-            quantity: 1,
-            currency_id: 'BRL',
-        }
-    ],
-    // Configuração otimizada para PIX
-    payment_methods: {
-        excluded_payment_types: [
-            { id: 'credit_card' },
-            { id: 'debit_card' },
-            { id: 'ticket' },
-            { id: 'bank_transfer' },
-            { id: 'atm' }
+    const preferenceData = {
+        items: [
+            {
+                id: externalReference,
+                title: description,
+                description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
+                unit_price: totalAmount,
+                quantity: 1,
+                currency_id: 'BRL',
+            }
+        ],
+        // ✅ CORREÇÃO: Permitir apenas PIX
+        payment_methods: {
+            excluded_payment_types: [
+                { id: 'credit_card' },
+                { id: 'debit_card' },
+                { id: 'ticket' },
+                { id: 'bank_transfer' },
+                { id: 'atm' }
+            ],
+            // ✅ Adicionar configuração específica para PIX
+            default_payment_method_id: 'pix',
+            installments: 1
+        },
+        // ✅ CORREÇÃO: Configuração correta do PIX
+        point_of_interaction: {
+            type: 'PIX',
+            data: {
+                description: `Ingresso: ${eventName} - ${tierName}`,
+            }
+        },
+        payer: {
+            name: userName,
+            email: userEmail,
+        },
+        statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
+        external_reference: externalReference,
+        notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
+        expires: true,
+        expiration_date_from: new Date().toISOString(),
+        expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        back_urls: {
+            success: `${cleanFrontendUrl}/payment/success`,
+            failure: `${cleanFrontendUrl}/payment/error`,
+            pending: `${cleanFrontendUrl}/payment/pending`
+        },
+        auto_return: 'approved',
+        // ✅ CORREÇÃO: Configurações otimizadas para PIX
+        processing_modes: ['aggregator'],
+        binary_mode: true,
+        // ✅ NOVO: Forçar geração de QR Code
+        tracks: [
+            {
+                type: 'checkout',
+                values: {
+                    pixel_id: 'YOUR_PIXEL_ID' // Opcional: para analytics
+                }
+            }
         ]
-    },
-    point_of_interaction: {
-        type: 'PIX',
-        data: {
-            // Forçar dados do PIX
-        }
-    },
-    payer: {
-        name: userName,
-        email: userEmail,
-    },
-    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
-    external_reference: externalReference,
-    notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
-    expires: true,
-    expiration_date_from: new Date().toISOString(),
-    expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    back_urls: {
-        success: `${cleanFrontendUrl}/payment/success`,
-        failure: `${cleanFrontendUrl}/payment/error`,
-        pending: `${cleanFrontendUrl}/payment/pending`
-    },
-    auto_return: 'approved',
-    // Adicionar configurações específicas para PIX
-    processing_modes: ['aggregator'],
-    binary_mode: true // Importante para PIX
-};
+    };
 
         console.log(`[QR📱] Dados da preferência enviada:`, JSON.stringify(preferenceData, null, 2));
 

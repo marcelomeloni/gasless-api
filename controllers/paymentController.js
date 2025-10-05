@@ -104,21 +104,21 @@ export const generatePaymentQR = async (req, res) => {
             isActive: eventAccount.isActive
         });
 
-        console.log(`[QR📱] Buscando taxa da plataforma...`);
-        const platformFeeBps = await getOrganizerFee(eventAddress);
-        console.log(`[QR📱] Taxa da plataforma definida: ${platformFeeBps} bps`);
+      onsole.log(`[QR📱] Buscando taxa da plataforma...`);
+const platformFeeBps = await getOrganizerFee(eventAddress);
+console.log(`[QR📱] Taxa da plataforma definida: ${platformFeeBps} bps`);
 
-        const platformFeePercentage = platformFeeBps / 100;
-        const baseAmount = priceBRLCents / 100;
-        const serviceFee = (priceBRLCents * platformFeeBps) / 10000;
-        const totalAmount = baseAmount + serviceFee;
+const platformFeePercentage = platformFeeBps / 100;
+const baseAmount = priceBRLCents / 100; //
+const serviceFee = (priceBRLCents * platformFeeBps) / 10000 / 100; 
+const totalAmount = baseAmount + serviceFee;
 
-        console.log('=== 🧮 DETALHES DO CÁLCULO ===');
-        console.log(`💰 Preço base: ${priceBRLCents} centavos = R$ ${baseAmount.toFixed(2)}`);
-        console.log(`📊 Taxa de serviço (${platformFeePercentage}%): R$ ${serviceFee.toFixed(2)}`);
-        console.log(`🎯 Total: R$ ${totalAmount.toFixed(2)}`);
-        console.log(`🔢 Detalhes: ${priceBRLCents} * ${platformFeeBps} / 10000 = ${serviceFee}`);
-        console.log('==============================');
+console.log('=== 🧮 DETALHES DO CÁLCULO ===');
+console.log(`💰 Preço base: ${priceBRLCents} centavos = R$ ${baseAmount.toFixed(2)}`);
+console.log(`📊 Taxa de serviço (${platformFeePercentage}%): R$ ${serviceFee.toFixed(2)}`);
+console.log(`🎯 Total: R$ ${totalAmount.toFixed(2)}`);
+console.log(`🔢 Detalhes: ${priceBRLCents} * ${platformFeeBps} / 10000 / 100 = ${serviceFee}`);
+console.log('==============================');
 
         if (isNaN(totalAmount) || totalAmount <= 0) {
             console.error(`[QR📱] ❌ Valor do pagamento inválido:`, {
@@ -160,35 +160,38 @@ export const generatePaymentQR = async (req, res) => {
         });
 
         console.log(`[QR📱] Criando preferência no Mercado Pago...`);
-       const preferenceData = {
+     const preferenceData = {
     items: [
         {
             id: externalReference,
             title: description,
             description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
-            unit_price: totalAmount,
+            unit_price: totalAmount, // Já está em reais
             quantity: 1,
             currency_id: 'BRL',
         }
     ],
+    // Configuração otimizada para PIX
     payment_methods: {
         excluded_payment_types: [
             { id: 'credit_card' },
             { id: 'debit_card' },
             { id: 'ticket' },
-            { id: 'bank_transfer' }
-        ],
-      
-        installments: 1
+            { id: 'bank_transfer' },
+            { id: 'atm' }
+        ]
     },
     point_of_interaction: {
-        type: 'PIX'  
+        type: 'PIX',
+        data: {
+            // Forçar dados do PIX
+        }
     },
     payer: {
         name: userName,
         email: userEmail,
     },
-    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`,
+    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
     external_reference: externalReference,
     notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
     expires: true,
@@ -196,8 +199,13 @@ export const generatePaymentQR = async (req, res) => {
     expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     back_urls: {
         success: `${cleanFrontendUrl}/payment/success`,
+        failure: `${cleanFrontendUrl}/payment/error`,
+        pending: `${cleanFrontendUrl}/payment/pending`
     },
     auto_return: 'approved',
+    // Adicionar configurações específicas para PIX
+    processing_modes: ['aggregator'],
+    binary_mode: true // Importante para PIX
 };
 
         console.log(`[QR📱] Dados da preferência enviada:`, JSON.stringify(preferenceData, null, 2));

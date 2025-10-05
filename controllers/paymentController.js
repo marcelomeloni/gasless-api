@@ -186,27 +186,29 @@ console.log('==============================');
 
         console.log(`[QR📱] Criando preferência no Mercado Pago...`);
    // CORREÇÃO NO paymentController.js - Remova o campo "tracks"
+// ✅ CONFIGURAÇÃO CORRIGIDA - Remover default_payment_method_id conflitante
 const preferenceData = {
     items: [
         {
             id: externalReference,
             title: description,
             description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
-            unit_price: totalAmount,
+            unit_price: parseFloat(totalAmount.toFixed(2)),
             quantity: 1,
             currency_id: 'BRL',
         }
     ],
+    // ✅ CONFIGURAÇÃO SIMPLIFICADA - Apenas excluir o que não quer usar
     payment_methods: {
         excluded_payment_types: [
             { id: 'credit_card' },
             { id: 'debit_card' },
             { id: 'ticket' }
-            // ✅ REMOVIDO: { id: 'bank_transfer' } e { id: 'atm' } para permitir PIX
-        ],
-        default_payment_method_id: 'pix',
-        installments: 1
+            // ❌ NÃO exclua 'bank_transfer' ou 'atm' - isso pode bloquear o PIX!
+        ]
+        // ❌ REMOVIDO: default_payment_method_id e installments
     },
+    // ✅ CONFIGURAÇÃO PIX OTIMIZADA
     point_of_interaction: {
         type: 'PIX',
         data: {
@@ -214,10 +216,10 @@ const preferenceData = {
         }
     },
     payer: {
-        name: userName,
+        name: userName.substring(0, 50),
         email: userEmail,
     },
-    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
+    statement_descriptor: eventName.substring(0, 12).replace(/\s/g, '').toUpperCase(),
     external_reference: externalReference,
     notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
     expires: true,
@@ -231,7 +233,6 @@ const preferenceData = {
     auto_return: 'approved',
     processing_modes: ['aggregator'],
     binary_mode: true
-    // ❌ REMOVIDO: tracks (campo inválido)
 };
 
         console.log(`[QR📱] Dados da preferência enviada:`, JSON.stringify(preferenceData, null, 2));

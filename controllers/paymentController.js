@@ -311,7 +311,7 @@ export const generatePaymentQR = async (req, res) => {
         });
         
         if (error.response) {
-            console.error('❌[QR📱] Resposta de erro do Mercado Pago:`, {
+            console.error('❌[QR📱] Resposta de erro do Mercado Pago:', {
                 status: error.response.status,
                 statusText: error.response.statusText,
                 data: error.response.data
@@ -319,7 +319,7 @@ export const generatePaymentQR = async (req, res) => {
         }
         
         if (error.cause) {
-            console.error('❌[QR📱] Causa do erro:`, error.cause);
+            console.error('❌[QR📱] Causa do erro:', error.cause);
         }
         
         res.status(500).json({
@@ -447,7 +447,7 @@ export const checkPaymentStatus = async (req, res) => {
         });
         
         if (error.response) {
-            console.error('❌[🔍checkPaymentStatus] Resposta de erro:`, error.response.data);
+            console.error('❌[🔍checkPaymentStatus] Resposta de erro:', error.response.data);
         }
         
         res.status(500).json({

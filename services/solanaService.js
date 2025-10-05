@@ -12,7 +12,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { SOLANA_RPC_URL, PAYER_MNEMONIC, PROGRAM_ID, TOKEN_METADATA_PROGRAM_ID } from '../config/index.js';
+import { SOLANA_RPC_URL, PAYER_MNEMONIC, PROGRAM_ID } from '../config/index.js';
+import { TOKEN_METADATA_PROGRAM_ID } from '../config/solana.js';
 
 const getKeypairFromMnemonic = (mnemonic) => {
     const seed = bip39.mnemonicToSeedSync(mnemonic, "");

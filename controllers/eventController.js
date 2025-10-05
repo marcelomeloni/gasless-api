@@ -155,37 +155,60 @@ export const createFullEvent = async (req, res) => {
     try {
         const { offChainData, onChainData, controller, userLoginData } = req.body;
         
-        if (!offChainData || !onChainData || !controller || !userLoginData) {
+        if (!offChainData || !onChainData || !controller) {
             return res.status(400).json({ 
                 success: false, 
-                error: "Dados do formulário, controlador ou credenciais de login ausentes." 
+                error: "Dados do formulário e controlador são obrigatórios." 
             });
         }
         
         const parsedOffChainData = JSON.parse(offChainData);
         const parsedOnChainData = JSON.parse(onChainData);
-        const parsedUserLoginData = JSON.parse(userLoginData);
         const controllerPubkey = new PublicKey(controller);
         const files = req.files;
 
-        console.log(' -> Derivando keypair do usuário no backend...');
-        
-        // Derivar a keypair do usuário no backend usando os mesmos dados de login
-        const userKeypair = await deriveUserKeypair(parsedUserLoginData);
-        
-        // Verificar se o publicKey derivado bate com o controller
-        const derivedPublicKey = userKeypair.publicKey.toString();
-        const requestedPublicKey = controllerPubkey.toString();
-        
-        if (derivedPublicKey !== requestedPublicKey) {
-            console.error(` ❌ Public key mismatch: ${derivedPublicKey} vs ${requestedPublicKey}`);
-            return res.status(400).json({
-                success: false,
-                error: "A chave pública derivada não corresponde ao controlador fornecido."
-            });
-        }
+        let userKeypair;
+        let userPublicKey;
 
-        console.log(` ✅ Keypair do usuário derivado: ${derivedPublicKey}`);
+        // ✅ DECISÃO: Se for adapter, NÃO derivar keypair - usar apenas a publicKey
+        if (userLoginData) {
+            const parsedUserLoginData = JSON.parse(userLoginData);
+            
+            if (parsedUserLoginData.loginType === 'adapter') {
+                console.log('🎯 Modo adapter: usando apenas publicKey fornecida');
+                userPublicKey = controllerPubkey;
+                
+                // Verificar se a publicKey é válida
+                if (!userPublicKey) {
+                    throw new Error("Public key inválida fornecida pelo adapter");
+                }
+                
+                console.log(` ✅ Usando publicKey do adapter: ${userPublicKey.toString()}`);
+                
+            } else {
+                // ✅ Para outros tipos de login, derivar a keypair normalmente
+                console.log('🔐 Modo local: derivando keypair do usuário...');
+                userKeypair = await deriveUserKeypair(parsedUserLoginData);
+                userPublicKey = userKeypair.publicKey;
+                
+                // Verificar se o publicKey derivado bate com o controller
+                const derivedPublicKey = userPublicKey.toString();
+                const requestedPublicKey = controllerPubkey.toString();
+                
+                if (derivedPublicKey !== requestedPublicKey) {
+                    console.error(` ❌ Public key mismatch: ${derivedPublicKey} vs ${requestedPublicKey}`);
+                    return res.status(400).json({
+                        success: false,
+                        error: "A chave pública derivada não corresponde ao controlador fornecido."
+                    });
+                }
+                console.log(` ✅ Keypair do usuário derivado: ${derivedPublicKey}`);
+            }
+        } else {
+            // Se não há userLoginData, assumir que é adapter e usar a publicKey fornecida
+            console.log('🎯 Sem userLoginData: usando modo adapter');
+            userPublicKey = controllerPubkey;
+        }
 
         // Processar uploads de arquivos
         let imageUrl = parsedOffChainData.image;
@@ -227,7 +250,7 @@ export const createFullEvent = async (req, res) => {
                 }
             },
             createdAt: new Date().toISOString(),
-            createdBy: derivedPublicKey // Usar a chave derivada
+            createdBy: userPublicKey.toString()
         };
         
         console.log(' -> Fazendo upload do JSON de metadados...');
@@ -237,9 +260,9 @@ export const createFullEvent = async (req, res) => {
         console.log(' -> Preparando transação on-chain...');
         const eventId = new anchor.BN(Date.now());
         
-        // Encontrar PDAs - IMPORTANTE: usar a chave do usuário como authority
+        // Encontrar PDAs - usar a chave do usuário como authority
         const [whitelistPda] = PublicKey.findProgramAddressSync(
-            [Buffer.from("whitelist"), userKeypair.publicKey.toBuffer()], 
+            [Buffer.from("whitelist"), userPublicKey.toBuffer()], 
             program.programId
         );
         const [eventPda] = PublicKey.findProgramAddressSync(
@@ -285,7 +308,7 @@ export const createFullEvent = async (req, res) => {
             .accounts({
                 whitelistAccount: whitelistPda,
                 eventAccount: eventPda,
-                controller: userKeypair.publicKey, // ← Authority é o usuário!
+                controller: userPublicKey, // ← Authority é o usuário!
                 payer: payerKeypair.publicKey,
                 systemProgram: SystemProgram.programId,
             })
@@ -295,10 +318,32 @@ export const createFullEvent = async (req, res) => {
         tx.recentBlockhash = blockhash;
         tx.feePayer = payerKeypair.publicKey;
 
-        console.log(' -> Assinando transação com o USUÁRIO (authority) e PAYER (taxas)...');
+        console.log(' -> Assinando transação...');
         
-        // **ASSINAR COM AMBAS: usuário (authority do evento) e payer (para taxas)**
-        tx.sign(userKeypair, payerKeypair);
+        if (userKeypair) {
+            // ✅ CASO 1: Login local - backend assina com userKeypair e payer
+            console.log('🔐 Assinando com userKeypair (login local)...');
+            tx.sign(userKeypair, payerKeypair);
+        } else {
+            // ✅ CASO 2: Adapter - apenas o payer assina (usuário assina no frontend)
+            console.log('🎯 Assinando apenas com payer (adapter - usuário assina no frontend)...');
+            tx.sign(payerKeypair);
+            
+            // Para adapter, serializar e retornar a transação para o frontend assinar
+            const serializedTx = tx.serialize({ requireAllSignatures: false });
+            const transactionBase64 = serializedTx.toString('base64');
+            
+            console.log('📤 Retornando transação para assinatura no frontend...');
+            
+            return res.status(200).json({
+                success: true,
+                transaction: transactionBase64,
+                message: "Transação pronta para assinatura",
+                eventPda: eventPda.toString(),
+                eventId: eventId.toString(),
+                metadataUrl: metadataUrl
+            });
+        }
 
         console.log(' -> Enviando transação para a blockchain...');
         
@@ -324,7 +369,7 @@ export const createFullEvent = async (req, res) => {
         }
 
         console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
-        console.log(`[🎉] Authority do evento: ${userKeypair.publicKey.toString()}`);
+        console.log(`[🎉] Authority do evento: ${userPublicKey.toString()}`);
         console.log(`[🎉] Evento criado em: ${eventPda.toString()}`);
 
         res.status(200).json({ 
@@ -333,7 +378,7 @@ export const createFullEvent = async (req, res) => {
             eventAddress: eventPda.toString(),
             eventId: eventId.toString(),
             metadataUrl: metadataUrl,
-            authority: userKeypair.publicKey.toString(), // ← Authority REAL é o usuário!
+            authority: userPublicKey.toString(),
             message: "Evento criado automaticamente com sucesso!" 
         });
 
@@ -344,13 +389,67 @@ export const createFullEvent = async (req, res) => {
             console.error('Logs da transação:', error.logs);
         }
         
-        // Log mais detalhado
         console.error('Stack trace:', error.stack);
         
         res.status(500).json({ 
             success: false, 
             error: error.message || 'Ocorreu um erro interno no servidor.',
             details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+};
+export const sendSignedTransaction = async (req, res) => {
+    console.log('[+] Recebendo transação assinada do frontend...');
+    
+    try {
+        const { signedTransaction } = req.body;
+        
+        if (!signedTransaction) {
+            return res.status(400).json({
+                success: false,
+                error: "Transação assinada é obrigatória."
+            });
+        }
+
+        console.log(' -> Desserializando transação assinada...');
+        const transaction = Transaction.from(Buffer.from(signedTransaction, 'base64'));
+        
+        console.log(' -> Enviando transação para a blockchain...');
+        const signature = await connection.sendRawTransaction(transaction.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: 'confirmed',
+            maxRetries: 3
+        });
+
+        console.log(` -> Transação enviada: ${signature}`);
+        
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        
+        console.log(' -> Aguardando confirmação...');
+        const confirmation = await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        }, 'confirmed');
+
+        if (confirmation.value.err) {
+            throw new Error(`Transação falhou: ${JSON.stringify(confirmation.value.err)}`);
+        }
+
+        console.log(`[✔] Transação assinada pelo frontend confirmada! Assinatura: ${signature}`);
+
+        res.status(200).json({
+            success: true,
+            signature,
+            message: "Transação assinada e confirmada com sucesso!"
+        });
+
+    } catch (error) {
+        console.error("❌ Erro ao processar transação assinada:", error);
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Erro ao processar transação assinada.'
         });
     }
 };

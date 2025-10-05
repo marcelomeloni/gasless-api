@@ -1,4 +1,4 @@
-import { program, payerKeypair, SystemProgram, PublicKey } from '../services/solanaService.js';
+import { program, payerKeypair, SystemProgram, PublicKey, connection } from '../services/solanaService.js';
 import { uploadToPinata, uploadJSONToPinata } from '../services/pinataService.js';
 import anchor from '@coral-xyz/anchor';
 import axios from 'axios';
@@ -354,7 +354,191 @@ export const createFullEvent = async (req, res) => {
         });
     }
 };
+// controllers/eventController.js - FUNÇÃO ATUALIZADA
 
+export const getEventForManagement = async (req, res) => {
+    const { eventAddress, userPublicKey } = req.params;
+    
+    console.log(`[+] Buscando evento para gestão: ${eventAddress}`);
+    console.log(`[+] Usuário solicitante: ${userPublicKey}`);
+
+    try {
+        if (!eventAddress || !userPublicKey) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Endereço do evento e chave pública do usuário são obrigatórios." 
+            });
+        }
+
+        // Validar e criar PublicKeys
+        let eventPubkey, userPubkey;
+        try {
+            eventPubkey = new PublicKey(eventAddress);
+            userPubkey = new PublicKey(userPublicKey);
+        } catch (error) {
+            console.error("❌ Erro ao criar PublicKey:", error);
+            return res.status(400).json({ 
+                success: false, 
+                error: "Endereço de evento ou usuário inválido." 
+            });
+        }
+
+        // Buscar dados do evento
+        console.log(' -> Buscando conta do evento on-chain...');
+        let eventAccount;
+        try {
+            eventAccount = await program.account.event.fetch(eventPubkey);
+            console.log(' ✅ Conta do evento encontrada');
+        } catch (error) {
+            console.error(' ❌ Erro ao buscar conta do evento:', error.message);
+            
+            if (error.message.includes('Account does not exist') || 
+                error.message.includes('could not find account')) {
+                return res.status(404).json({ 
+                    success: false, 
+                    error: "Evento não encontrado na blockchain." 
+                });
+            }
+            throw error;
+        }
+
+        // Verificar se o usuário é o controller do evento
+        console.log(' -> Verificando permissões...');
+        const isController = eventAccount.controller.equals(userPubkey);
+        
+        if (!isController) {
+            console.log(` ❌ Permissão negada: ${eventAccount.controller.toString()} vs ${userPubkey.toString()}`);
+            return res.status(403).json({ 
+                success: false, 
+                error: "Você não é o criador deste evento. Apenas o criador pode gerenciá-lo." 
+            });
+        }
+        console.log(' ✅ Permissão concedida');
+
+        // Buscar metadados off-chain
+        console.log(' -> Buscando metadados off-chain...');
+        let metadata = { 
+            name: "Evento Sem Nome",
+            description: "Descrição não disponível",
+            properties: {}
+        };
+        
+        try {
+            if (eventAccount.metadataUri && eventAccount.metadataUri !== '') {
+                console.log(` -> Fetching metadata from: ${eventAccount.metadataUri}`);
+                const response = await fetch(eventAccount.metadataUri);
+                if (response.ok) {
+                    const fetchedMetadata = await response.json();
+                    metadata = { ...metadata, ...fetchedMetadata };
+                    console.log(' ✅ Metadados carregados com sucesso');
+                } else {
+                    console.warn(' ⚠️  Falha ao buscar metadados, status:', response.status);
+                }
+            } else {
+                console.warn(' ⚠️  MetadataUri vazio ou não definido');
+            }
+        } catch (metadataError) {
+            console.warn(' ⚠️  Não foi possível carregar metadados:', metadataError.message);
+        }
+
+        // Calcular saldo da reserve account
+        console.log(' -> Calculando saldo da reserve account...');
+        let reserveBalance = 0;
+        try {
+            const [refundReservePda] = PublicKey.findProgramAddressSync(
+                [Buffer.from("refund_reserve"), eventPubkey.toBuffer()],
+                program.programId
+            );
+            
+            reserveBalance = await connection.getBalance(refundReservePda);
+            console.log(` ✅ Saldo da reserve: ${reserveBalance} lamports`);
+        } catch (balanceError) {
+            console.warn(' ⚠️  Não foi possível obter saldo da reserve:', balanceError.message);
+        }
+
+        // Converter dados BN para números para o frontend
+        const formatBN = (bnValue) => {
+            if (!bnValue) return 0;
+            return typeof bnValue === 'object' && bnValue.toNumber ? bnValue.toNumber() : bnValue;
+        };
+
+        // Formatar tiers
+        const formattedTiers = (eventAccount.tiers || []).map(tier => ({
+            name: tier.name || 'Sem nome',
+            priceBrlCents: formatBN(tier.priceBrlCents),
+            maxTicketsSupply: formatBN(tier.maxTicketsSupply),
+            ticketsSold: formatBN(tier.ticketsSold) || 0
+        }));
+
+        // Formatar validators
+        const formattedValidators = (eventAccount.validators || []).map(validator => 
+            validator.toString ? validator.toString() : String(validator)
+        );
+
+        // Formatar dados para o frontend
+        const eventData = {
+            publicKey: eventAddress,
+            account: {
+                eventId: formatBN(eventAccount.eventId),
+                controller: eventAccount.controller.toString(),
+                canceled: Boolean(eventAccount.canceled),
+                state: formatBN(eventAccount.state) || 0,
+                salesStartDate: formatBN(eventAccount.salesStartDate),
+                salesEndDate: formatBN(eventAccount.salesEndDate),
+                totalTicketsSold: formatBN(eventAccount.totalTicketsSold) || 0,
+                tiers: formattedTiers,
+                maxTicketsPerWallet: formatBN(eventAccount.maxTicketsPerWallet) || 1,
+                resaleAllowed: Boolean(eventAccount.resaleAllowed),
+                transferFeeBps: formatBN(eventAccount.transferFeeBps) || 500,
+                royaltyBps: formatBN(eventAccount.royaltyBps) || 0,
+                metadataUri: eventAccount.metadataUri || '',
+                refundReserve: eventAccount.refundReserve ? eventAccount.refundReserve.toString() : '',
+                validators: formattedValidators
+            },
+            metadata: metadata,
+            reserveBalance: reserveBalance,
+            isController: true
+        };
+
+        console.log(`[✔] Evento preparado para gestão: ${metadata.name}`);
+        console.log(`[✔] Tiers: ${formattedTiers.length}, Validadores: ${formattedValidators.length}`);
+
+        res.status(200).json({
+            success: true,
+            event: eventData
+        });
+
+    } catch (error) {
+        console.error("❌ Erro crítico ao buscar evento para gestão:", error);
+        
+        // Log detalhado para debugging
+        console.error("Stack trace:", error.stack);
+        console.error("Error name:", error.name);
+        console.error("Error message:", error.message);
+
+        if (error.message?.includes('Account does not exist') || 
+            error.message?.includes('could not find account') ||
+            error.message?.includes('Account not found')) {
+            return res.status(404).json({ 
+                success: false, 
+                error: "Evento não encontrado na blockchain." 
+            });
+        }
+        
+        if (error.message?.includes('Invalid public key')) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Endereço do evento inválido." 
+            });
+        }
+
+        res.status(500).json({ 
+            success: false, 
+            error: "Erro interno do servidor ao buscar dados do evento.",
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
 export const getActiveEvents = async (req, res) => {
     console.log('[+] Fetching active events...');
     try {

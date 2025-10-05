@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { createFullEvent, getActiveEvents, getEventDetails } from '../controllers/eventController.js';
+import { createFullEvent, getEventForManagement, getActiveEvents, getEventDetails } from '../controllers/eventController.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -16,5 +16,5 @@ router.post(
 
 router.get('/active', getActiveEvents);
 router.get('/:eventAddress', getEventDetails);
-
+router.get('/manage/:eventAddress/:userPublicKey', getEventForManagement);
 export default router;

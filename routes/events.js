@@ -1,6 +1,13 @@
+// routes/events.js
 import express from 'express';
 import multer from 'multer';
-import { createFullEvent, getEventForManagement, getActiveEvents, getEventDetails } from '../controllers/eventController.js';
+import { 
+    createFullEvent, 
+    getEventForManagement, 
+    getActiveEvents, 
+    getEventDetails,
+    sendSignedTransaction // ✅ ADICIONE ESTA IMPORT
+} from '../controllers/eventController.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -17,5 +24,6 @@ router.post(
 router.get('/active', getActiveEvents);
 router.get('/:eventAddress', getEventDetails);
 router.get('/manage/:eventAddress/:userPublicKey', getEventForManagement);
-router.post('/send-signed-transaction', eventController.sendSignedTransaction);
+router.post('/send-signed-transaction', sendSignedTransaction); // ✅ CORRIGIDO
+
 export default router;

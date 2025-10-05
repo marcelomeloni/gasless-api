@@ -12,8 +12,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { SOLANA_RPC_URL, PAYER_MNEMONIC, PROGRAM_ID } from '../config/index.js';
-import { TOKEN_METADATA_PROGRAM_ID } from '../config/solana.js';
+import { SOLANA_RPC_URL, PAYER_MNEMONIC } from '../config/index.js';
+import { TOKEN_METADATA_PROGRAM_ID, PROGRAM_ID } from '../config/solana.js';
 
 console.log(`[SolanaService] Iniciando configuração do serviço Solana...`);
 console.log(`[SolanaService] RPC URL: ${SOLANA_RPC_URL}`);

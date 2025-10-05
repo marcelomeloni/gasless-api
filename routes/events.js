@@ -17,4 +17,5 @@ router.post(
 router.get('/active', getActiveEvents);
 router.get('/:eventAddress', getEventDetails);
 router.get('/manage/:eventAddress/:userPublicKey', getEventForManagement);
+router.post('/send-signed-transaction', eventController.sendSignedTransaction);
 export default router;

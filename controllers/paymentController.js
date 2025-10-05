@@ -104,7 +104,7 @@ export const generatePaymentQR = async (req, res) => {
             isActive: eventAccount.isActive
         });
 
-      onsole.log(`[QR📱] Buscando taxa da plataforma...`);
+      console.log(`[QR📱] Buscando taxa da plataforma...`);
 const platformFeeBps = await getOrganizerFee(eventAddress);
 console.log(`[QR📱] Taxa da plataforma definida: ${platformFeeBps} bps`);
 

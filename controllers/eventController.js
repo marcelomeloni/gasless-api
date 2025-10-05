@@ -3,7 +3,151 @@ import { uploadToPinata, uploadJSONToPinata } from '../services/pinataService.js
 import anchor from '@coral-xyz/anchor';
 import axios from 'axios';
 import FormData from 'form-data';
+export const createGaslessEvent = async (req, res) => {
+    console.log('[+] Recebida requisição para criar evento gasless...');
 
+    try {
+        const { offChainData, onChainData } = req.body;
+        if (!offChainData || !onChainData) {
+            return res.status(400).json({ success: false, error: "Dados do formulário ausentes." });
+        }
+        
+        const parsedOffChainData = JSON.parse(offChainData);
+        const parsedOnChainData = JSON.parse(onChainData);
+        const files = req.files;
+
+        // Usar uma chave do sistema como controller
+        const controllerPubkey = payerKeypair.publicKey;
+
+        let imageUrl = parsedOffChainData.image;
+        let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
+
+        // Uploads (mesmo código anterior)
+        if (files.image?.[0]) {
+            console.log(' -> Fazendo upload da imagem do evento...');
+            imageUrl = await uploadToPinata(files.image[0]);
+            console.log(` -> Imagem do evento enviada: ${imageUrl}`);
+        } else {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Imagem principal do evento é obrigatória." 
+            });
+        }
+
+        if (files.organizerLogo?.[0]) {
+            console.log(' -> Fazendo upload do logo do organizador...');
+            organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
+            console.log(` -> Logo enviado: ${organizerLogoUrl}`);
+        } else {
+            organizerLogoUrl = '';
+        }
+
+        // Preparar metadados
+        const finalMetadata = {
+            ...parsedOffChainData,
+            image: imageUrl,
+            organizer: { 
+                ...parsedOffChainData.organizer, 
+                organizerLogo: organizerLogoUrl 
+            },
+            properties: {
+                ...parsedOffChainData.properties,
+                dateTime: {
+                    ...parsedOffChainData.properties.dateTime,
+                    start: new Date(parsedOffChainData.properties.dateTime.start).toISOString(),
+                    end: new Date(parsedOffChainData.properties.dateTime.end).toISOString(),
+                }
+            },
+            createdAt: new Date().toISOString(),
+            createdBy: controllerPubkey.toString()
+        };
+        
+        console.log(' -> Fazendo upload do JSON de metadados...');
+        const metadataUrl = await uploadJSONToPinata(finalMetadata);
+        console.log(` -> Metadados enviados: ${metadataUrl}`);
+
+        console.log(' -> Preparando transação on-chain...');
+        const eventId = new anchor.BN(Date.now());
+        
+        const [whitelistPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("whitelist"), controllerPubkey.toBuffer()], 
+            program.programId
+        );
+        const [eventPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("event"), eventId.toBuffer('le', 8)], 
+            program.programId
+        );
+        
+        const tiersInput = parsedOnChainData.tiers.map(tier => {
+            const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
+            return {
+                name: tier.name,
+                priceBrlCents: new anchor.BN(priceBRLCents),
+                maxTicketsSupply: new anchor.BN(parseInt(tier.maxTicketsSupply, 10)),
+            };
+        });
+
+        const salesStartDate = new Date(parsedOnChainData.salesStartDate);
+        const salesEndDate = new Date(parsedOnChainData.salesEndDate);
+        
+        if (salesStartDate >= salesEndDate) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "A data de fim das vendas deve ser posterior à data de início." 
+            });
+        }
+
+        console.log(' -> Enviando transação gasless...');
+        
+        // Usar .rpc() para assinatura automática pelo payer do sistema
+        const signature = await program.methods
+            .createEvent(
+                eventId, 
+                metadataUrl, 
+                new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
+                new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
+                parseInt(parsedOnChainData.royaltyBps, 10), 
+                parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
+                tiersInput
+            )
+            .accounts({
+                whitelistAccount: whitelistPda,
+                eventAccount: eventPda,
+                controller: controllerPubkey,
+                payer: payerKeypair.publicKey,
+                systemProgram: SystemProgram.programId,
+            })
+            .rpc({
+                commitment: 'confirmed',
+                skipPreflight: false
+            });
+
+        console.log(`[✔] Evento gasless criado com sucesso! Assinatura: ${signature}`);
+
+        res.status(200).json({ 
+            success: true, 
+            signature, 
+            eventAddress: eventPda.toString(),
+            eventId: eventId.toString(),
+            metadataUrl: metadataUrl,
+            controller: controllerPubkey.toString(),
+            message: "Evento criado com sucesso sem necessidade de carteira!" 
+        });
+
+    } catch (error) {
+        console.error("❌ Erro no processo de criação gasless do evento:", error);
+        
+        if (error.logs) {
+            console.error('Logs da transação:', error.logs);
+        }
+        
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Ocorreu um erro interno no servidor.',
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+};
 export const createFullEvent = async (req, res) => {
     console.log('[+] Recebida requisição para criar evento completo.');
 

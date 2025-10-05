@@ -185,66 +185,54 @@ console.log('==============================');
         });
 
         console.log(`[QR📱] Criando preferência no Mercado Pago...`);
-    const preferenceData = {
-        items: [
-            {
-                id: externalReference,
-                title: description,
-                description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
-                unit_price: totalAmount,
-                quantity: 1,
-                currency_id: 'BRL',
-            }
+   // CORREÇÃO NO paymentController.js - Remova o campo "tracks"
+const preferenceData = {
+    items: [
+        {
+            id: externalReference,
+            title: description,
+            description: `Ingresso para ${eventName} - Comprador: ${userName} (${userEmail})`,
+            unit_price: totalAmount,
+            quantity: 1,
+            currency_id: 'BRL',
+        }
+    ],
+    payment_methods: {
+        excluded_payment_types: [
+            { id: 'credit_card' },
+            { id: 'debit_card' },
+            { id: 'ticket' }
+            // ✅ REMOVIDO: { id: 'bank_transfer' } e { id: 'atm' } para permitir PIX
         ],
-        // ✅ CORREÇÃO: Permitir apenas PIX
-        payment_methods: {
-            excluded_payment_types: [
-                { id: 'credit_card' },
-                { id: 'debit_card' },
-                { id: 'ticket' },
-                { id: 'bank_transfer' },
-                { id: 'atm' }
-            ],
-            // ✅ Adicionar configuração específica para PIX
-            default_payment_method_id: 'pix',
-            installments: 1
-        },
-        // ✅ CORREÇÃO: Configuração correta do PIX
-        point_of_interaction: {
-            type: 'PIX',
-            data: {
-                description: `Ingresso: ${eventName} - ${tierName}`,
-            }
-        },
-        payer: {
-            name: userName,
-            email: userEmail,
-        },
-        statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
-        external_reference: externalReference,
-        notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
-        expires: true,
-        expiration_date_from: new Date().toISOString(),
-        expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-        back_urls: {
-            success: `${cleanFrontendUrl}/payment/success`,
-            failure: `${cleanFrontendUrl}/payment/error`,
-            pending: `${cleanFrontendUrl}/payment/pending`
-        },
-        auto_return: 'approved',
-        // ✅ CORREÇÃO: Configurações otimizadas para PIX
-        processing_modes: ['aggregator'],
-        binary_mode: true,
-        // ✅ NOVO: Forçar geração de QR Code
-        tracks: [
-            {
-                type: 'checkout',
-                values: {
-                    pixel_id: 'YOUR_PIXEL_ID' // Opcional: para analytics
-                }
-            }
-        ]
-    };
+        default_payment_method_id: 'pix',
+        installments: 1
+    },
+    point_of_interaction: {
+        type: 'PIX',
+        data: {
+            description: `Ingresso: ${eventName} - ${tierName}`,
+        }
+    },
+    payer: {
+        name: userName,
+        email: userEmail,
+    },
+    statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`.toUpperCase(),
+    external_reference: externalReference,
+    notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
+    expires: true,
+    expiration_date_from: new Date().toISOString(),
+    expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    back_urls: {
+        success: `${cleanFrontendUrl}/payment/success`,
+        failure: `${cleanFrontendUrl}/payment/error`,
+        pending: `${cleanFrontendUrl}/payment/pending`
+    },
+    auto_return: 'approved',
+    processing_modes: ['aggregator'],
+    binary_mode: true
+    // ❌ REMOVIDO: tracks (campo inválido)
+};
 
         console.log(`[QR📱] Dados da preferência enviada:`, JSON.stringify(preferenceData, null, 2));
 

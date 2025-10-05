@@ -99,7 +99,10 @@ export const processPaidTicketForNewUser = async ({
                     isPaid: true,
                     paymentAmount: (priceBRLCents / 100).toFixed(2)
                 };
-                sendTicketEmail({ name, email }, ticketDataForEmail);
+                const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+if (!emailResult.success) {
+    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+}
             } catch(e) {
                 console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
             }
@@ -197,7 +200,10 @@ export const generateWalletAndMint = async (req, res) => {
                     eventImage: metadata.image,
                     registrationId: registrationId,
                 };
-                sendTicketEmail({ name, email }, ticketDataForEmail);
+                const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+if (!emailResult.success) {
+    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+}
             } catch(e) {
                 console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
             }
@@ -349,7 +355,10 @@ export const mintForExistingUser = async (req, res) => {
                         registrationId: registrationId,
                     };
                     
-                    sendTicketEmail({ name, email }, ticketDataForEmail);
+                    const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+if (!emailResult.success) {
+    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+}
                 } catch (e) {
                     console.error("Falha ao preparar/enviar e-mail:", e);
                 }

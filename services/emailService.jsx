@@ -73,7 +73,14 @@ export async function sendTicketEmail(userData, ticketData) {
 
     if (!userEmail) {
         console.warn("❌ Usuário sem e-mail cadastrado. Pulando envio de ingresso.");
-        return;
+        return { success: false, error: "No email provided" };
+    }
+    
+    // Validação básica de email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(userEmail)) {
+        console.warn(`❌ E-mail inválido: ${userEmail}`);
+        return { success: false, error: "Invalid email format" };
     }
     
     try {
@@ -83,7 +90,7 @@ export async function sendTicketEmail(userData, ticketData) {
             throw new Error("RESEND_API_KEY está faltando");
         }
 
-        // 1. Gerar PDF (agora com o QR Code correto)
+        // 1. Gerar PDF
         console.log(`📄 Gerando PDF para o evento: ${eventName}`);
         const pdfBuffer = await generateTicketPDF(ticketData);
 
@@ -118,11 +125,11 @@ export async function sendTicketEmail(userData, ticketData) {
 
         if (error) {
             console.error("❌ Erro retornado pela API da Resend:", error);
-            throw error;
+            return { success: false, error };
         }
 
         console.log("✅ E-mail enviado com sucesso! ID:", data.id);
-        return { data, error };
+        return { success: true, data };
 
     } catch (error) {
         console.error("❌ Erro detalhado no processo de envio do e-mail:", {
@@ -130,6 +137,6 @@ export async function sendTicketEmail(userData, ticketData) {
             userEmail,
             eventName
         });
-        throw error;
+        return { success: false, error };
     }
 }

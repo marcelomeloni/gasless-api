@@ -6,7 +6,10 @@ import {
     getEventForManagement, 
     getActiveEvents, 
     getEventDetails,
-    sendSignedTransaction // ✅ ADICIONE ESTA IMPORT
+    sendSignedTransaction,
+    addValidatorGasless,
+    cancelEventGasless,
+    removeValidatorGasless
 } from '../controllers/eventController.js';
 
 const router = express.Router();
@@ -24,6 +27,9 @@ router.post(
 router.get('/active', getActiveEvents);
 router.get('/:eventAddress', getEventDetails);
 router.get('/manage/:eventAddress/:userPublicKey', getEventForManagement);
-router.post('/send-signed-transaction', sendSignedTransaction); // ✅ CORRIGIDO
+router.post('/send-signed-transaction', sendSignedTransaction); 
+router.post('/:eventAddress/validators/add', addValidatorGasless);
+router.post('/:eventAddress/validators/remove', removeValidatorGasless);
+router.post('/:eventAddress/cancel', cancelEventGasless);
 
 export default router;

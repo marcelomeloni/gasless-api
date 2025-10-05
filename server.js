@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
 import anchor from '@coral-xyz/anchor';
 const { Program, AnchorProvider, Wallet } = anchor;
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
@@ -18,8 +18,8 @@ import { createHash } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { sendTicketEmail } from './services/emailService.jsx';
 
-// --- MERCADO PAGO IMPORT ---
-import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+// Importar rotas modularizadas
+import { setupPaymentRoutes } from './routes/payment/paymentRoutes.js';
 
 // --- INITIAL SETUP ---
 dotenv.config();
@@ -52,14 +52,6 @@ if (!MERCADOPAGO_ACCESS_TOKEN) {
     throw new Error("A variável de ambiente MERCADOPAGO_ACCESS_TOKEN é obrigatória.");
 }
 
-// Configure Mercado Pago
-const client = new MercadoPagoConfig({ 
-    accessToken: MERCADOPAGO_ACCESS_TOKEN,
-    options: {
-        timeout: 5000 // Opcional: tempo limite para as requisições
-    }
-});
-
 const PROGRAM_ID = new PublicKey("5kQZsq3z1P9TQuR2tBXJjhKr46JnEcsDKYDnEfNCB792");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
@@ -81,31 +73,9 @@ const program = new Program(idl, PROGRAM_ID, provider);
 console.log(`[+] API configured with program: ${PROGRAM_ID.toString()}`);
 console.log(`[+] Payer wallet: ${payerKeypair.publicKey.toString()}`);
 console.log(`[+] Supabase client initialized.`);
-console.log(`[+] Mercado Pago configured.`);
 
 // --- PAYMENT SESSIONS STORAGE ---
 const activePaymentSessions = new Map();
-async function getOrganizerFee(eventAddress) {
-    try {
-        const eventPubkey = new PublicKey(eventAddress);
-        const eventAccount = await program.account.event.fetch(eventPubkey);
-        const organizerAddress = eventAccount.controller;
-        
-        // Buscar a whitelist do organizador para pegar a taxa
-        const [whitelistPda] = PublicKey.findProgramAddressSync(
-            [Buffer.from("whitelist"), organizerAddress.toBuffer()], 
-            program.programId
-        );
-        
-        const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
-        // A taxa está em "basis points" (ex: 150 = 1.5%, 200 = 2%)
-        return whitelistAccount.platformFeeBps; 
-        
-    } catch (error) {
-        console.error("Erro ao buscar taxa do organizador, usando padrão:", error);
-        return 150; // Taxa padrão de 1.5% em caso de erro
-    }
-}
 
 // --- SUPABASE HELPER FUNCTION ---
 const upsertUserInSupabase = async (userData) => {
@@ -184,17 +154,20 @@ async function saveRegistrationData({ eventAddress, wallet_address, name, phone,
     
     return newRegistration.id;
 }
-// ====================================================================
-// --- Endpoint 1: WEB2 ONBOARDING (PIX/FREE) ---
-// ====================================================================
-// Assumindo que a função 'saveRegistrationData' já existe no seu código.
-// const { saveRegistrationData } = require('./supabase-helpers');
 
-// Assumindo que a função 'saveRegistrationData' que criamos antes já existe no seu código.
-async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, priceBRLCents, userEmail, userName }) {
+// ====================================================================
+// --- ROTAS QUE AINDA PRECISAM SER MODULARIZADAS ---
+// ====================================================================
+
+// Free onboarding (mantido temporariamente)
+app.post('/generate-wallet-and-mint', async (req, res) => {
+    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
+    if (!eventAddress || tierIndex === undefined || !name || !phone) {
+        return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
+    }
+    console.log(`[+] Starting full onboarding for user: ${name}`);
+
     try {
-        const { name, phone, email, company, sector, role } = formData;
-
         // 1. Geração da nova carteira para o usuário
         const mnemonic = bip39.generateMnemonic();
         const newUserKeypair = getKeypairFromMnemonic(mnemonic);
@@ -237,7 +210,7 @@ async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, 
             systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
         }).signers([payerKeypair, mintKeypair]).rpc();
         
-        console.log(`[✔] Paid ticket minted successfully! Sig: ${signature}`);
+        console.log(`[✔] Onboarding on-chain successful! Sig: ${signature}`);
         
         // 3. Salva tudo no banco de dados
         const registrationId = await saveRegistrationData({
@@ -261,8 +234,6 @@ async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, 
                     privateKey: privateKey, 
                     eventImage: metadata.image,
                     registrationId: registrationId,
-                    isPaid: true,
-                    paymentAmount: (priceBRLCents / 100).toFixed(2)
                 };
                 sendTicketEmail({ name, email }, ticketDataForEmail);
             } catch(e) {
@@ -270,562 +241,7 @@ async function processPaidTicketForNewUser({ eventAddress, tierIndex, formData, 
             }
         }
 
-        return {
-            success: true, 
-            publicKey: newUserPublicKey.toString(), 
-            seedPhrase: mnemonic, 
-            privateKey: privateKey, 
-            mintAddress: mintAddress, 
-            signature,
-            registrationId: registrationId,
-            isPaid: true
-        };
-
-    } catch (error) {
-        console.error("[✘] Error during paid ticket processing:", error);
-        throw error;
-    }
-}
-
-app.post('/api/generate-payment-qr', async (req, res) => {
-    const {
-        eventAddress,
-        tierIndex,
-        priceBRLCents,
-        userName,
-        userEmail,
-        tierName,
-        eventName,
-        formData
-    } = req.body;
-
-    try {
-        // ✅ 1. BUSCAR DADOS DO EVENTO E TAXA
-        console.log(`[QR] Iniciando geração de QR para evento: ${eventAddress}`);
-        const eventPubkey = new PublicKey(eventAddress);
-        const eventAccount = await program.account.event.fetch(eventPubkey);
-        const organizerAddress = eventAccount.controller;
-        console.log(`[QR] Organizador do evento: ${organizerAddress.toString()}`);
-
-        // ✅ 2. BUSCAR TAXA DO ORGANIZADOR (com fallback)
-        let platformFeeBps = 150; // taxa padrão 1.5%
-        try {
-            const [whitelistPda] = PublicKey.findProgramAddressSync(
-                [Buffer.from("whitelist"), organizerAddress.toBuffer()], 
-                program.programId
-            );
-            console.log(`[QR] Buscando whitelist PDA: ${whitelistPda.toString()}`);
-            
-            const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
-            platformFeeBps = whitelistAccount.platformFeeBps;
-            console.log(`[QR] Taxa do organizador encontrada: ${platformFeeBps} bps`);
-        } catch (error) {
-            console.warn(`[QR] Organizador não encontrado na whitelist, usando taxa padrão: ${platformFeeBps} bps`);
-        }
-
-        // ✅ 3. CALCULAR VALORES
-        const platformFeePercentage = platformFeeBps / 100;
-        const baseAmount = priceBRLCents / 100;
-        const serviceFee = (priceBRLCents * platformFeeBps) / 10000;
-        const totalAmount = baseAmount + serviceFee;
-
-        console.log('=== 🧮 DETALHES DO CÁLCULO ===');
-        console.log(`Preço base: R$ ${baseAmount.toFixed(2)}`);
-        console.log(`Taxa de serviço (${platformFeePercentage}%): R$ ${serviceFee.toFixed(2)}`);
-        console.log(`Total: R$ ${totalAmount.toFixed(2)}`);
-        console.log('==============================');
-
-        // ✅ 4. VALIDAÇÕES
-        if (isNaN(totalAmount) || totalAmount <= 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Valor do pagamento inválido'
-            });
-        }
-
-        if (totalAmount < 0.01) {
-            return res.status(400).json({
-                success: false,
-                error: 'Valor mínimo do pagamento é R$ 0,01'
-            });
-        }
-
-        // ✅ 5. CONFIGURAÇÃO MERCADO PAGO CORRIGIDA
-        const description = `Ingresso: ${eventName} - ${tierName}`;
-        const externalReference = `TICKET_${eventAddress}_${tierIndex}_${Date.now()}`;
-
-        const API_URL = process.env.API_URL || 'https://gasless-api-ke68.onrender.com';
-        const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-
-        const cleanApiUrl = API_URL.replace(/\/$/, '');
-        const cleanFrontendUrl = FRONTEND_URL.replace(/\/$/, '');
-
-        console.log(`[QR] Criando preferência no Mercado Pago...`);
-        console.log(`[QR] Valor total: R$ ${totalAmount.toFixed(2)}`);
-
-        // ✅ CORREÇÃO: Configuração otimizada para PIX
-        const preferenceData = {
-            items: [
-                {
-                    id: externalReference,
-                    title: description,
-                    description: `Ingresso para ${eventName}`,
-                    unit_price: totalAmount,
-                    quantity: 1,
-                    currency_id: 'BRL',
-                }
-            ],
-            // ✅ CORREÇÃO: Configuração específica para PIX
-            payment_methods: {
-                excluded_payment_types: [
-                    { id: 'credit_card' },
-                    { id: 'debit_card' },
-                    { id: 'ticket' },
-                    { id: 'bank_transfer' }
-                ],
-                default_payment_method_id: 'pix',
-                installments: 1
-            },
-            // ✅ CORREÇÃO: Habilitar PIX explicitamente
-            point_of_interaction: {
-                type: 'PIX'
-            },
-            payer: {
-                name: userName,
-                email: userEmail,
-            },
-            statement_descriptor: `EVENTO${eventName.substring(0, 8).replace(/\s/g, '')}`,
-            external_reference: externalReference,
-            notification_url: `${cleanApiUrl}/webhooks/mercadopago`,
-            expires: true,
-            expiration_date_from: new Date().toISOString(),
-            expiration_date_to: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            back_urls: {
-                success: `${cleanFrontendUrl}/payment/success`,
-            },
-            auto_return: 'approved',
-        };
-
-        console.log('[QR] Preference data enviada ao Mercado Pago');
-
-        // ✅ 6. CHAMADA AO MERCADO PAGO
-        const preferenceClient = new Preference(client);
-        const response = await preferenceClient.create({ body: preferenceData });
-        
-        // ✅ CORREÇÃO: Log completo da resposta para debug
-        console.log('[QR] Resposta completa do Mercado Pago:');
-        console.log('- point_of_interaction:', response.point_of_interaction);
-        console.log('- transaction_data:', response.point_of_interaction?.transaction_data);
-        console.log('- init_point:', response.init_point);
-        console.log('- sandbox_init_point:', response.sandbox_init_point);
-
-        // ✅ CORREÇÃO: Extrair dados do QR Code de forma mais robusta
-        const qrCode = response.point_of_interaction?.transaction_data?.qr_code;
-        const qrCodeBase64 = response.point_of_interaction?.transaction_data?.qr_code_base64;
-        
-        // ✅ CORREÇÃO: Se não tiver QR code, tentar fallback para a URL de pagamento
-        let paymentUrl = response.init_point || response.sandbox_init_point;
-        
-        if (!qrCode && !qrCodeBase64) {
-            console.warn('[QR] QR Code não gerado pelo Mercado Pago. Verifique:');
-            console.warn('1. Se a conta Mercado Pago está configurada para PIX');
-            console.warn('2. Se o valor é aceito para PIX');
-            console.warn('3. Usando URL de fallback:', paymentUrl);
-        } else {
-            console.log('[QR] QR code gerado com sucesso!');
-        }
-
-        // ✅ 7. SALVAR SESSÃO DE PAGAMENTO
-        activePaymentSessions.set(externalReference, {
-            eventAddress,
-            tierIndex,
-            priceBRLCents,
-            platformFeeBps,
-            formData,
-            userName,
-            userEmail,
-            tierName,
-            eventName,
-            preferenceId: response.id,
-            createdAt: new Date(),
-            status: 'pending',
-            amountDetails: {
-                baseAmount,
-                serviceFee,
-                serviceFeeRate: platformFeePercentage,
-                totalAmount
-            }
-        });
-
-        console.log(`[QR] Sessão de pagamento salva: ${externalReference}`);
-
-        // ✅ 8. CONFIGURAR EXPIRAÇÃO
-        setTimeout(() => {
-            if (activePaymentSessions.has(externalReference)) {
-                const session = activePaymentSessions.get(externalReference);
-                if (session.status === 'pending') {
-                    session.status = 'expired';
-                    activePaymentSessions.set(externalReference, session);
-                    console.log(`[QR] Sessão expirada: ${externalReference}`);
-                }
-            }
-        }, 15 * 60 * 1000);
-
-        // ✅ 9. RETORNAR RESPOSTA CORRIGIDA
-        const responseData = {
-            success: true,
-            qrCode: qrCode,
-            qrCodeBase64: qrCodeBase64,
-            externalReference: externalReference,
-            ticketUrl: paymentUrl, // ✅ URL de fallback
-            preferenceId: response.id,
-            expirationDate: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            amountDetails: {
-                baseAmount: baseAmount,
-                serviceFee: serviceFee,
-                serviceFeeRate: platformFeePercentage,
-                totalAmount: totalAmount
-            },
-            // ✅ CORREÇÃO: Incluir informações de debug
-            paymentInfo: {
-                hasQrCode: !!qrCode,
-                hasQrCodeBase64: !!qrCodeBase64,
-                paymentUrl: !!paymentUrl
-            }
-        };
-
-        console.log(`[QR] ✅ Resposta preparada para ${userName}`);
-        console.log(`[QR] QR Code disponível: ${!!qrCodeBase64}`);
-        console.log(`[QR] URL de pagamento: ${paymentUrl}`);
-
-        res.status(200).json(responseData);
-
-    } catch (error) {
-        console.error('❌ Erro ao gerar QR code do Mercado Pago:', error);
-        
-        // ✅ CORREÇÃO: Log mais detalhado do erro
-        if (error.response) {
-            console.error('❌ Resposta de erro do Mercado Pago:', error.response.data);
-        }
-        
-        res.status(500).json({
-            success: false,
-            error: 'Falha ao gerar QR code de pagamento',
-            details: error.message,
-            debug: process.env.NODE_ENV === 'development' ? {
-                message: error.response?.data?.message || 'Sem detalhes adicionais',
-                stack: error.stack
-            } : undefined
-        });
-    }
-});
-/**
- * Check payment status
- */
-app.get('/api/payment-status/:externalReference', async (req, res) => {
-    const { externalReference } = req.params;
-
-    try {
-        const paymentSession = activePaymentSessions.get(externalReference);
-        
-        if (!paymentSession) {
-            return res.status(404).json({
-                success: false,
-                error: 'Payment session not found'
-            });
-        }
-
-        // Search for payments with this external reference
-        const filters = {
-            external_reference: externalReference
-        };
-
-        // CORREÇÃO: Use um nome diferente para a instância
-        const paymentClient = new Payment(client);
-        const searchResult = await paymentClient.search({
-            qs: filters
-        });
-
-        const payments = searchResult.results;
-        
-        if (payments.length === 0) {
-            return res.status(200).json({
-                success: true,
-                status: 'pending',
-                paid: false
-            });
-        }
-
-        const payment = payments[0];
-        const isPaid = payment.status === 'approved';
-        
-        if (isPaid && paymentSession.status === 'pending') {
-            paymentSession.status = 'paid';
-            paymentSession.paymentId = payment.id;
-            activePaymentSessions.set(externalReference, paymentSession);
-        }
-
-        res.status(200).json({
-            success: true,
-            status: payment.status,
-            paid: isPaid,
-            paymentId: payment.id,
-            transactionAmount: payment.transaction_amount,
-            currency: payment.currency_id,
-            lastUpdated: payment.date_last_updated
-        });
-
-    } catch (error) {
-        console.error('Error checking payment status:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to check payment status',
-            details: error.message
-        });
-    }
-});
-
-/**
- * Process paid ticket after successful payment
- */
-app.post('/api/process-paid-ticket', async (req, res) => {
-    const { externalReference } = req.body;
-
-    try {
-        const paymentSession = activePaymentSessions.get(externalReference);
-        
-        if (!paymentSession) {
-            return res.status(404).json({
-                success: false,
-                error: 'Sessão de pagamento não encontrada'
-            });
-        }
-
-        // ✅ VERIFICAR SE O PAGAMENTO FOI REALMENTE APROVADO
-        const filters = {
-            external_reference: externalReference,
-            status: 'approved'
-        };
-
-        const payment = new Payment(client);
-        const searchResult = await payment.search({
-            qs: filters
-        });
-
-        const approvedPayments = searchResult.body.results;
-        
-        if (approvedPayments.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Pagamento não concluído ou não verificado',
-                status: 'pending'
-            });
-        }
-
-        // ✅ ATUALIZAR STATUS DA SESSÃO
-        paymentSession.status = 'paid';
-        paymentSession.paymentId = approvedPayments[0].id;
-        activePaymentSessions.set(externalReference, paymentSession);
-
-        console.log(`[💰] Processando ingresso pago para: ${paymentSession.userName}`);
-        console.log(`[💰] Valor pago: R$ ${paymentSession.amountDetails?.totalAmount || 'N/A'}`);
-
-        // ✅ PROCESSAR MINT DO INGRESSO
-        const { eventAddress, tierIndex, formData, userEmail, userName } = paymentSession;
-        
-        const mintResponse = await processPaidTicketForNewUser({
-            eventAddress,
-            tierIndex,
-            formData,
-            priceBRLCents: paymentSession.priceBRLCents,
-            userEmail,
-            userName
-        });
-
-        // ✅ REMOVER SESSÃO APÓS SUCESSO
-        activePaymentSessions.delete(externalReference);
-
-        console.log(`[🎉] Ingresso pago processado com sucesso!`);
-        console.log(`[🎉] NFT Mint: ${mintResponse.mintAddress}`);
-        console.log(`[🎉] Carteira do usuário: ${mintResponse.publicKey}`);
-
-        res.status(200).json({
-            success: true,
-            message: 'Pagamento verificado e ingresso processado com sucesso',
-            ticketData: mintResponse,
-            // ✅ INCLUIR DETALHES DO VALOR PAGO NA RESPOSTA
-            paymentDetails: {
-                amountPaid: paymentSession.amountDetails?.totalAmount,
-                baseAmount: paymentSession.amountDetails?.baseAmount,
-                serviceFee: paymentSession.amountDetails?.serviceFee
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Erro ao processar ingresso pago:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Falha ao processar ingresso pago',
-            details: error.message
-        });
-    }
-});
-
-/**
- * Mercado Pago webhook for payment notifications
- */
-app.post('/webhooks/mercadopago', async (req, res) => {
-    try {
-        const { type, data } = req.body;
-        
-        if (type === 'payment') {
-            const paymentId = data.id;
-            console.log(`[Webhook] Received payment update for ID: ${paymentId}`);
-            
-            // Get payment details usando o novo SDK
-            const paymentClient = new Payment(client);
-            const payment = await paymentClient.get({ id: paymentId });
-            const externalReference = payment.external_reference;
-            
-            if (payment.status === 'approved' && externalReference) {
-                const paymentSession = activePaymentSessions.get(externalReference);
-                
-                if (paymentSession && paymentSession.status === 'pending') {
-                    console.log(`[Webhook] Processing paid ticket for: ${externalReference}`);
-                    
-                    // Update session status
-                    paymentSession.status = 'paid';
-                    paymentSession.paymentId = paymentId;
-                    activePaymentSessions.set(externalReference, paymentSession);
-                }
-            }
-        }
-        
-        res.status(200).send('OK');
-    } catch (error) {
-        console.error('Error processing webhook:', error);
-        res.status(500).send('Error processing webhook');
-    }
-});
-app.post('/generate-wallet-and-mint-paid', async (req, res) => {
-    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents, paymentMethod } = req.body;
-    
-    if (!eventAddress || tierIndex === undefined || !name || !phone) {
-        return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
-    }
-    
-    if (paymentMethod !== 'pix') {
-        return res.status(400).json({ error: "Método de pagamento deve ser PIX." });
-    }
-
-    console.log(`[+] Starting paid onboarding for user: ${name}`);
-
-    try {
-        const result = await processPaidTicketForNewUser({
-            eventAddress,
-            tierIndex,
-            formData: { name, phone, email, company, sector, role },
-            priceBRLCents,
-            userEmail: email,
-            userName: name
-        });
-
-        res.status(200).json(result);
-
-    } catch (error) {
-        console.error("[✘] Error during paid onboarding:", error);
-        const anchorError = anchor.AnchorError.parse(error.logs);
-        const errorMessage = anchorError ? anchorError.error.errorMessage : error.message;
-        res.status(500).json({ 
-            error: "Server error during paid onboarding.", 
-            details: errorMessage || "Unknown error" 
-        });
-    }
-});
-app.post('/generate-wallet-and-mint', async (req, res) => {
-    const { eventAddress, tierIndex, name, phone, email, company, sector, role, priceBRLCents } = req.body;
-    if (!eventAddress || tierIndex === undefined || !name || !phone) {
-        return res.status(400).json({ error: "Parâmetros de evento e cadastro são necessários." });
-    }
-    console.log(`[+] Starting full onboarding for user: ${name}`);
-
-    try {
-        // 1. Geração da nova carteira para o usuário
-        const mnemonic = bip39.generateMnemonic();
-        const newUserKeypair = getKeypairFromMnemonic(mnemonic);
-        const newUserPublicKey = newUserKeypair.publicKey;
-        const privateKey = bs58.encode(newUserKeypair.secretKey);
-        
-        // 2. Lógica on-chain para mintar o ingresso
-        const eventPubkey = new PublicKey(eventAddress);
-        const eventAccount = await program.account.event.fetch(eventPubkey);
-        // ... (validações de tier, preço, etc., se necessário) ...
-
-        const userDataString = [name, phone, email, company, sector, role].map(s => (s || "").trim()).join('|');
-        const dataHash = createHash('sha256').update(userDataString).digest();
-        
-        // As chamadas para registrar usuário e criar contador on-chain permanecem as mesmas
-        const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), newUserPublicKey.toBuffer()], program.programId);
-        await program.methods.registerUser(Array.from(dataHash)).accounts({
-            authority: newUserPublicKey, userProfile: userProfilePda,
-            payer: payerKeypair.publicKey, systemProgram: SystemProgram.programId,
-        }).rpc();
-
-        const [buyerTicketCountPda] = PublicKey.findProgramAddressSync([Buffer.from("buyer_ticket_count"), eventPubkey.toBuffer(), newUserPublicKey.toBuffer()], program.programId);
-        await program.methods.createBuyerCounter().accounts({
-            payer: payerKeypair.publicKey, event: eventPubkey, buyer: newUserPublicKey,
-            buyerTicketCount: buyerTicketCountPda, systemProgram: SystemProgram.programId
-        }).rpc();
-        
-        const mintKeypair = Keypair.generate();
-        const mintAddress = mintKeypair.publicKey.toString(); // <- Pegamos o mintAddress aqui
-        
-        const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
-        const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), mintKeypair.publicKey.toBuffer()], program.programId);
-        const associatedTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, newUserPublicKey);
-        const [metadataPda] = PublicKey.findProgramAddressSync([Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintKeypair.publicKey.toBuffer()], TOKEN_METADATA_PROGRAM_ID);
-
-        const signature = await program.methods.mintTicket(tierIndex).accounts({
-            globalConfig: globalConfigPda, event: eventPubkey, payer: payerKeypair.publicKey, buyer: newUserPublicKey,
-            mintAccount: mintKeypair.publicKey, ticket: ticketPda, buyerTicketCount: buyerTicketCountPda,
-            associatedTokenAccount, metadataAccount: metadataPda, metadataProgram: TOKEN_METADATA_PROGRAM_ID,
-            tokenProgram: TOKEN_PROGRAM_ID, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-            systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
-        }).signers([payerKeypair, mintKeypair]).rpc();
-        
-        console.log(`[✔] Onboarding on-chain successful! Sig: ${signature}`);
-        
-        // 3. Salva tudo no banco de dados APÓS o mint e captura o ID do registro
-        const registrationId = await saveRegistrationData({
-            eventAddress,
-            wallet_address: newUserPublicKey.toString(),
-            mint_address: mintAddress, // Passa o endereço do NFT recém-criado
-            name, phone, email, company, sector, role
-        });
-
-        // 4. Envio de e-mail (lógica inalterada)
-        if (email) {
-            try {
-                const metadataResponse = await fetch(eventAccount.metadataUri);
-                const metadata = await metadataResponse.json();
-                const ticketDataForEmail = {
-                    eventName: metadata.name, 
-                    eventDate: metadata.properties.dateTime.start,
-                    eventLocation: metadata.properties.location, 
-                    mintAddress: mintAddress,
-                    seedPhrase: mnemonic, 
-                    privateKey: privateKey, 
-                    eventImage: metadata.image,
-                    registrationId: registrationId,
-                    // ...outros dados do metadata...
-                };
-                sendTicketEmail({ name, email }, ticketDataForEmail);
-            } catch(e) {
-                console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
-            }
-        }
-
-        // 5. Resposta final ao cliente, agora incluindo o registrationId
+        // 5. Resposta final
         res.status(200).json({ 
             success: true, 
             publicKey: newUserPublicKey.toString(), 
@@ -833,7 +249,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
             privateKey: privateKey, 
             mintAddress: mintAddress, 
             signature,
-            registrationId: registrationId // <-- NOVO DADO PARA O QR CODE!
+            registrationId: registrationId
         });
 
     } catch (error) {
@@ -847,54 +263,7 @@ app.post('/generate-wallet-and-mint', async (req, res) => {
     }
 });
 
-app.get('/check-organizer-permission/:walletAddress', async (req, res) => {
-    const { walletAddress } = req.params;
-    if (!walletAddress) {
-        return res.status(400).json({ success: false, error: 'O endereço da carteira é obrigatório.' });
-    }
-
-    try {
-        const walletPubkey = new PublicKey(walletAddress);
-        let isAllowed = false;
-
-        // 1. Verificar permissão de Admin (GlobalConfig)
-        try {
-            const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
-            const globalConfig = await program.account.globalConfig.fetch(globalConfigPda);
-            if (globalConfig.authority.equals(walletPubkey)) {
-                isAllowed = true;
-            }
-        } catch (e) {
-            // Ignora erro se o GlobalConfig não existir (ainda não inicializado)
-            if (!e.message.includes("Account does not exist")) {
-                console.error("Erro ao buscar GlobalConfig:", e);
-            }
-        }
-
-        // 2. Verificar permissão de Whitelist, apenas se não for Admin
-        if (!isAllowed) {
-            try {
-                const [whitelistPda] = PublicKey.findProgramAddressSync([Buffer.from("whitelist"), walletPubkey.toBuffer()], program.programId);
-                const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
-                if (whitelistAccount.isWhitelisted) {
-                    isAllowed = true;
-                }
-            } catch (e) {
-                // Ignora erro se a conta da Whitelist não existir
-            }
-        }
-        
-        console.log(`[✔] Permissão verificada para ${walletAddress}: ${isAllowed}`);
-        res.status(200).json({ success: true, isAllowed });
-
-    } catch (error) {
-        console.error("[✘] Erro na verificação de permissão:", error);
-        res.status(500).json({ success: false, error: 'Erro no servidor ao verificar permissões.' });
-    }
-});
-// ====================================================================
-// --- Endpoint 2: MINT FOR EXISTING WEB3 USERS (PÓS-PIX) ---
-// ====================================================================
+// Mint para usuário existente
 app.post('/mint-for-existing-user', async (req, res) => {
     const { eventAddress, buyerAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
     if (!eventAddress || !buyerAddress || tierIndex === undefined) {
@@ -906,12 +275,11 @@ app.post('/mint-for-existing-user', async (req, res) => {
         const eventPubkey = new PublicKey(eventAddress);
         const buyer = new PublicKey(buyerAddress);
         
-        // 1. Lógica on-chain para mintar o ingresso PRIMEIRO
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const selectedTier = eventAccount.tiers[tierIndex];
         if (!selectedTier) return res.status(400).json({ error: "Tier inválido." });
 
-        // Garante que o perfil e o contador on-chain existem antes de mintar
+        // Garante que o perfil e o contador on-chain existem
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), buyer.toBuffer()], program.programId);
         const userProfileAccount = await connection.getAccountInfo(userProfilePda);
         if (!userProfileAccount) {
@@ -953,52 +321,47 @@ app.post('/mint-for-existing-user', async (req, res) => {
 
         console.log(`[✔] Mint on-chain bem-sucedido! Sig: ${signature}`);
 
-        // 2. Salva tudo no banco de dados APÓS o mint e captura o ID do registro
+        // Salva no banco de dados
         const registrationId = await saveRegistrationData({
             eventAddress,
             wallet_address: buyer.toString(),
-            mint_address: mintAddress, // Passa o endereço do NFT recém-criado
+            mint_address: mintAddress,
             name, phone, email, company, sector, role
         });
 
-        // 3. Envio de e-mail (lógica inalterada)
-        const triggerEmail = async () => {
-            if (email) {
-                try {
-                    const metadataResponse = await fetch(eventAccount.metadataUri);
-                    const metadata = await metadataResponse.json();
-                    
-                    const ticketDataForEmail = {
-                        eventName: metadata.name, 
-                        eventDate: metadata.properties.dateTime.start,
-                        eventLocation: metadata.properties.location, 
-                        mintAddress: mintAddress,
-                        eventImage: metadata.image, 
-                        eventDescription: metadata.description, 
-                        eventCategory: metadata.category, 
-                        eventTags: metadata.tags, 
-                        organizerName: metadata.organizer.name, 
-                        organizerLogo: metadata.organizer.organizerLogo, 
-                        organizerWebsite: metadata.organizer.website,
-                        registrationId: registrationId,
-                    };
-                    
-                    sendTicketEmail({ name, email }, ticketDataForEmail);
-                } catch (e) {
-                    console.error("Falha ao preparar/enviar e-mail:", e);
-                }
+        // Envio de e-mail
+        if (email) {
+            try {
+                const metadataResponse = await fetch(eventAccount.metadataUri);
+                const metadata = await metadataResponse.json();
+                
+                const ticketDataForEmail = {
+                    eventName: metadata.name, 
+                    eventDate: metadata.properties.dateTime.start,
+                    eventLocation: metadata.properties.location, 
+                    mintAddress: mintAddress,
+                    eventImage: metadata.image, 
+                    eventDescription: metadata.description, 
+                    eventCategory: metadata.category, 
+                    eventTags: metadata.tags, 
+                    organizerName: metadata.organizer.name, 
+                    organizerLogo: metadata.organizer.organizerLogo, 
+                    organizerWebsite: metadata.organizer.website,
+                    registrationId: registrationId,
+                };
+                
+                sendTicketEmail({ name, email }, ticketDataForEmail);
+            } catch (e) {
+                console.error("Falha ao preparar/enviar e-mail:", e);
             }
-        };
+        }
 
-        triggerEmail();
-
-        // 4. Resposta final ao cliente, agora incluindo o registrationId
         res.status(200).json({ 
             success: true, 
             isPaid: true, 
             signature, 
             mintAddress: mintAddress,
-            registrationId: registrationId // <-- NOVO DADO PARA O QR CODE!
+            registrationId: registrationId
         });
 
     } catch (error) {
@@ -1013,10 +376,54 @@ app.post('/mint-for-existing-user', async (req, res) => {
     }
 });
 
+// Verificação de permissão de organizador
+app.get('/check-organizer-permission/:walletAddress', async (req, res) => {
+    const { walletAddress } = req.params;
+    if (!walletAddress) {
+        return res.status(400).json({ success: false, error: 'O endereço da carteira é obrigatório.' });
+    }
+
+    try {
+        const walletPubkey = new PublicKey(walletAddress);
+        let isAllowed = false;
+
+        // 1. Verificar permissão de Admin (GlobalConfig)
+        try {
+            const [globalConfigPda] = PublicKey.findProgramAddressSync([Buffer.from("config")], program.programId);
+            const globalConfig = await program.account.globalConfig.fetch(globalConfigPda);
+            if (globalConfig.authority.equals(walletPubkey)) {
+                isAllowed = true;
+            }
+        } catch (e) {
+            if (!e.message.includes("Account does not exist")) {
+                console.error("Erro ao buscar GlobalConfig:", e);
+            }
+        }
+
+        // 2. Verificar permissão de Whitelist
+        if (!isAllowed) {
+            try {
+                const [whitelistPda] = PublicKey.findProgramAddressSync([Buffer.from("whitelist"), walletPubkey.toBuffer()], program.programId);
+                const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
+                if (whitelistAccount.isWhitelisted) {
+                    isAllowed = true;
+                }
+            } catch (e) {}
+        }
+        
+        console.log(`[✔] Permissão verificada para ${walletAddress}: ${isAllowed}`);
+        res.status(200).json({ success: true, isAllowed });
+
+    } catch (error) {
+        console.error("[✘] Erro na verificação de permissão:", error);
+        res.status(500).json({ success: false, error: 'Erro no servidor ao verificar permissões.' });
+    }
+});
 
 // ====================================================================
-// --- Endpoint 3: DATA RETRIEVAL ---
+// --- ROTAS DE DADOS E EVENTOS (PRECISAM SER MODULARIZADAS) ---
 // ====================================================================
+
 app.get('/ticket-data/:mintAddress', async (req, res) => {
     const { mintAddress } = req.params;
     if (!mintAddress) return res.status(400).json({ error: "NFT mintAddress is required." });
@@ -1058,30 +465,20 @@ app.get('/ticket-data/:mintAddress', async (req, res) => {
     }
 });
 
-// ====================================================================
-// --- Endpoint 4: FETCH VALIDATED TICKETS ---
-// ====================================================================
 app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
     const { eventAddress } = req.params;
     if (!eventAddress) return res.status(400).json({ error: "Event address is required." });
 
     try {
         const eventPubkey = new PublicKey(eventAddress);
-        // Pega todos os ingressos validados da blockchain
         const allTicketsForEvent = await program.account.ticket.all([{ memcmp: { offset: 8, bytes: eventPubkey.toBase58() } }]);
         const redeemedTickets = allTicketsForEvent.filter(ticket => ticket.account.redeemed);
 
         if (redeemedTickets.length === 0) return res.status(200).json([]);
 
-        // 1. Pega os endereços de todos os donos dos ingressos
         const ownerAddresses = redeemedTickets.map(ticket => ticket.account.owner.toString());
-        
-        // 2. Busca no Supabase os nomes correspondentes a esses endereços
         const { data: profiles } = await supabase.from('profiles').select('wallet_address, name').in('wallet_address', ownerAddresses);
-        
-        // 3. Cria um "mapa" para facilitar a busca (carteira -> nome)
         const profilesMap = new Map(profiles.map(p => [p.wallet_address, p.name]));
-
 
         const validatedEntries = redeemedTickets.map(ticket => {
             const ownerAddress = ticket.account.owner.toString();
@@ -1103,37 +500,24 @@ app.get('/event/:eventAddress/validated-tickets', async (req, res) => {
 app.get('/events/active', async (req, res) => {
     console.log('[+] Fetching active events...');
     try {
-        // ⭐ BUSCAR TODOS OS EVENTOS E FILTRAR NO JAVASCRIPT
         const allEvents = await program.account.event.all();
         console.log(` -> Found ${allEvents.length} total events on-chain`);
         
         const nowInSeconds = Math.floor(Date.now() / 1000);
         console.log(` -> Current timestamp: ${nowInSeconds}`);
         
-        // ⭐ FILTRAR DIRETAMENTE NO JAVASCRIPT
         const fullyActiveEvents = allEvents.filter(event => {
             const acc = event.account;
-            
-            // Debug detalhado
-            console.log(`\n--- Checking Event ${event.publicKey} ---`);
-            console.log(`State: ${acc.state}, Canceled: ${acc.canceled}`);
-            console.log(`Sales Start: ${acc.salesStartDate.toNumber()}`);
-            console.log(`Sales End: ${acc.salesEndDate.toNumber()}`);
-            console.log(`Now: ${nowInSeconds}`);
-            
             const isStateActive = acc.state === 1;
             const isNotCanceled = !acc.canceled;
             const isInSalesPeriod = nowInSeconds >= acc.salesStartDate.toNumber() && 
                                   nowInSeconds <= acc.salesEndDate.toNumber();
-            
-            console.log(`Active State: ${isStateActive}, Not Canceled: ${isNotCanceled}, In Sales Period: ${isInSalesPeriod}`);
             
             return isStateActive && isNotCanceled && isInSalesPeriod;
         });
         
         console.log(` -> Found ${fullyActiveEvents.length} events that are fully active.`);
 
-        // Busca de metadados para os eventos ativos
         const eventsWithMetadata = await Promise.all(
             fullyActiveEvents.map(async (event) => {
                 try {
@@ -1169,6 +553,7 @@ app.get('/events/active', async (req, res) => {
         res.status(500).json({ error: "Server error fetching events.", details: error.message });
     }
 });
+
 app.get('/user-tickets/:ownerAddress', async (req, res) => {
     const { ownerAddress } = req.params;
     if (!ownerAddress) {
@@ -1178,9 +563,8 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
 
     try {
         const ownerPublicKey = new PublicKey(ownerAddress);
-        const TICKET_ACCOUNT_OWNER_FIELD_OFFSET = 72; // Offset do campo 'owner' na conta Ticket
+        const TICKET_ACCOUNT_OWNER_FIELD_OFFSET = 72;
 
-        // 1. Buscar todas as contas de ingresso para o usuário
         const userTicketAccounts = await program.account.ticket.all([
             { memcmp: { offset: TICKET_ACCOUNT_OWNER_FIELD_OFFSET, bytes: ownerPublicKey.toBase58() } }
         ]);
@@ -1191,14 +575,11 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
         }
         console.log(` -> Encontrados ${userTicketAccounts.length} ingressos on-chain.`);
 
-        // 2. Otimização: Agrupar ingressos por evento para buscar metadados em lote
         const eventPublicKeys = [...new Set(userTicketAccounts.map(t => t.account.event.toString()))]
             .map(pkStr => new PublicKey(pkStr));
 
-        // 3. Buscar as contas dos eventos correspondentes
         const eventAccounts = await program.account.event.fetchMultiple(eventPublicKeys);
         
-        // 4. Buscar os metadados de cada evento e criar um mapa para consulta rápida
         const eventDataMap = new Map();
         await Promise.all(eventAccounts.map(async (account, index) => {
             if (account) {
@@ -1214,7 +595,6 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
             }
         }));
         
-        // 5. Buscar todas as listagens ativas do marketplace
         const allListings = await program.account.marketplaceListing.all();
         const listedNftMints = new Set(
             allListings
@@ -1222,7 +602,6 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
                 .map(l => l.account.nftMint.toString())
         );
 
-        // 6. Combinar os dados: ingresso + metadados do evento + status de listagem
         const enrichedTickets = userTicketAccounts.map(ticket => {
             const eventDetails = eventDataMap.get(ticket.account.event.toString());
             return {
@@ -1247,6 +626,7 @@ app.get('/user-tickets/:ownerAddress', async (req, res) => {
         res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os ingressos.' });
     }
 });
+
 app.get('/event-details/:eventAddress', async (req, res) => {
     const { eventAddress } = req.params;
     if (!eventAddress) {
@@ -1256,12 +636,9 @@ app.get('/event-details/:eventAddress', async (req, res) => {
 
     try {
         const eventPubkey = new PublicKey(eventAddress);
-
-        // 1. Busca os dados on-chain do evento
         const account = await program.account.event.fetch(eventPubkey);
         console.log(` -> Dados on-chain encontrados.`);
 
-        // 2. Busca os metadados off-chain
         const metadataResponse = await fetch(account.metadataUri);
         if (!metadataResponse.ok) {
             throw new Error(`Falha ao buscar metadados da URI: ${account.metadataUri}`);
@@ -1269,7 +646,6 @@ app.get('/event-details/:eventAddress', async (req, res) => {
         const metadata = await metadataResponse.json();
         console.log(` -> Metadados off-chain encontrados: ${metadata.name}`);
 
-        // 3. Combina tudo em uma única resposta
         res.status(200).json({
             success: true,
             event: {
@@ -1281,7 +657,6 @@ app.get('/event-details/:eventAddress', async (req, res) => {
     } catch (error) {
         console.error("[✘] Erro ao buscar detalhes do evento:", error);
         
-        // Trata erros comuns, como evento não encontrado
         if (error.message.includes('Account does not exist')) {
             return res.status(404).json({ success: false, error: 'Evento não encontrado.' });
         }
@@ -1292,7 +667,7 @@ app.get('/event-details/:eventAddress', async (req, res) => {
         res.status(500).json({ success: false, error: 'Ocorreu um erro no servidor ao buscar os dados do evento.' });
     }
 });
-// --- NOVO ENDPOINT DE VALIDAÇÃO POR ID ---
+
 app.post('/validate-by-id/:registrationId', async (req, res) => {
     const { registrationId } = req.params;
     const { validatorAddress } = req.body;
@@ -1303,7 +678,6 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
     console.log(`[+] Iniciando validação para o registro: ${registrationId}`);
 
     try {
-        // 1. Busca o registro no banco de dados para obter os endereços on-chain
         const { data: registration, error: dbError } = await supabase
             .from('registrations')
             .select('*')
@@ -1319,12 +693,10 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
 
         console.log(` -> Registro encontrado. Evento: ${event_address}, Mint: ${mint_address}`);
 
-        // 2. Com os dados do banco, executa a validação na blockchain
         const eventPubkey = new PublicKey(event_address);
         const nftMintPubkey = new PublicKey(mint_address);
         const validatorPubkey = new PublicKey(validatorAddress);
 
-        // 2a. Verifica a permissão do validador
         const eventAccount = await program.account.event.fetch(eventPubkey);
         const isValidator = eventAccount.validators.some(v => v.equals(validatorPubkey));
         if (!isValidator) {
@@ -1333,8 +705,7 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
         }
         console.log(` -> Validador ${validatorAddress} autorizado.`);
 
-        // 2b. Encontra a conta do ticket e verifica se já foi usado
-        const TICKET_NFT_MINT_FIELD_OFFSET = 40; // 8 (discriminator) + 32 (event)
+        const TICKET_NFT_MINT_FIELD_OFFSET = 40;
         const tickets = await program.account.ticket.all([
             { memcmp: { offset: TICKET_NFT_MINT_FIELD_OFFSET, bytes: nftMintPubkey.toBase58() } }
         ]);
@@ -1352,7 +723,6 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
         const ownerPubkey = ticketAccount.account.owner;
         console.log(` -> Ingresso on-chain encontrado. Dono: ${ownerPubkey.toString()}`);
 
-        // 2c. Executa a transação de resgate (redeem)
         const [ticketPda] = PublicKey.findProgramAddressSync([Buffer.from("ticket"), eventPubkey.toBuffer(), nftMintPubkey.toBuffer()], program.programId);
         const nftTokenAccount = await getAssociatedTokenAddress(nftMintPubkey, ownerPubkey);
 
@@ -1367,7 +737,6 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
         
         console.log(`[✔] Ingresso validado com sucesso! Assinatura: ${signature}`);
 
-        // 3. Retorna a resposta de sucesso com o nome do participante
         res.status(200).json({ 
             success: true, 
             signature,
@@ -1381,6 +750,48 @@ app.post('/validate-by-id/:registrationId', async (req, res) => {
         res.status(500).json({ success: false, error: "Erro do servidor durante a validação.", details: errorMessage || "Erro desconhecido" });
     }
 });
+
+// ====================================================================
+// --- CONFIGURAÇÃO DAS ROTAS DE PAGAMENTO MODULARIZADAS ---
+// ====================================================================
+
+// Configurar e registrar as rotas de pagamento
+const paymentRouter = setupPaymentRoutes({
+    program,
+    activePaymentSessions,
+    getOrganizerFee: async (eventAddress) => {
+        try {
+            const eventPubkey = new PublicKey(eventAddress);
+            const eventAccount = await program.account.event.fetch(eventPubkey);
+            const organizerAddress = eventAccount.controller;
+            
+            const [whitelistPda] = PublicKey.findProgramAddressSync(
+                [Buffer.from("whitelist"), organizerAddress.toBuffer()], 
+                program.programId
+            );
+            
+            const whitelistAccount = await program.account.whitelist.fetch(whitelistPda);
+            return whitelistAccount.platformFeeBps; 
+            
+        } catch (error) {
+            console.error("Erro ao buscar taxa do organizador, usando padrão:", error);
+            return 150;
+        }
+    },
+    payerKeypair,
+    mercadopagoToken: MERCADOPAGO_ACCESS_TOKEN,
+    saveRegistrationData,
+    supabase,
+    getKeypairFromMnemonic,
+    sendTicketEmail
+});
+
+app.use('/api', paymentRouter);
+
+// ====================================================================
+// --- ROTA DE CRIAÇÃO DE EVENTO (PRECISA SER MODULARIZADA) ---
+// ====================================================================
+
 app.post(
     '/api/create-full-event',
     upload.fields([
@@ -1391,7 +802,6 @@ app.post(
         console.log('[+] Recebida requisição para criar evento completo.');
 
         try {
-            // 1. Extrair e converter os dados do FormData
             const { offChainData, onChainData, controller } = req.body;
             if (!offChainData || !onChainData || !controller) {
                 return res.status(400).json({ success: false, error: "Dados do formulário ou do controlador ausentes." });
@@ -1402,7 +812,6 @@ app.post(
             const controllerPubkey = new PublicKey(controller);
             const files = req.files;
 
-            // 2. Fazer o upload das imagens para o Pinata (se existirem)
             let imageUrl = parsedOffChainData.image;
             let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
 
@@ -1433,30 +842,26 @@ app.post(
                 }
             };
 
-            // Upload da imagem principal
-          if (files.image?.[0]) {
-    console.log(' -> Fazendo upload da imagem do evento...');
-    imageUrl = await uploadToPinata(files.image[0]);
-    console.log(` -> Imagem do evento enviada: ${imageUrl}`);
-} else {
-    console.error('❌ Nenhuma imagem foi recebida no upload');
-    return res.status(400).json({ 
-        success: false, 
-        error: "Imagem principal do evento é obrigatória." 
-    });
-}
+            if (files.image?.[0]) {
+                console.log(' -> Fazendo upload da imagem do evento...');
+                imageUrl = await uploadToPinata(files.image[0]);
+                console.log(` -> Imagem do evento enviada: ${imageUrl}`);
+            } else {
+                console.error('❌ Nenhuma imagem foi recebida no upload');
+                return res.status(400).json({ 
+                    success: false, 
+                    error: "Imagem principal do evento é obrigatória." 
+                });
+            }
 
-            // Upload do logo do organizador
             if (files.organizerLogo?.[0]) {
                 console.log(' -> Fazendo upload do logo do organizador...');
                 organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
                 console.log(` -> Logo enviado: ${organizerLogoUrl}`);
             } else if (!organizerLogoUrl || organizerLogoUrl.startsWith('[Arquivo:')) {
-                // Se não há logo, usa uma imagem padrão ou mantém vazio
                 organizerLogoUrl = '';
             }
 
-            // 3. Montar o objeto de metadados final com as URLs do Pinata
             const finalMetadata = {
                 ...parsedOffChainData,
                 image: imageUrl,
@@ -1472,12 +877,10 @@ app.post(
                         end: new Date(parsedOffChainData.properties.dateTime.end).toISOString(),
                     }
                 },
-                // Metadados adicionais para rastreamento
                 createdAt: new Date().toISOString(),
                 createdBy: controllerPubkey.toString()
             };
             
-            // 4. Fazer o upload do JSON de metadados para o Pinata
             console.log(' -> Fazendo upload do JSON de metadados...');
             try {
                 const jsonResponse = await axios.post(
@@ -1494,11 +897,9 @@ app.post(
                 const metadataUrl = `https://gateway.pinata.cloud/ipfs/${jsonResponse.data.IpfsHash}`;
                 console.log(` -> Metadados enviados: ${metadataUrl}`);
 
-                // 5. Preparar dados e chamar a transação na blockchain
                 console.log(' -> Preparando transação on-chain...');
                 const eventId = new anchor.BN(Date.now());
                 
-                // Encontrar PDAs
                 const [whitelistPda] = PublicKey.findProgramAddressSync(
                     [Buffer.from("whitelist"), controllerPubkey.toBuffer()], 
                     program.programId
@@ -1508,7 +909,6 @@ app.post(
                     program.programId
                 );
                 
-                // Preparar tiers
                 const tiersInput = parsedOnChainData.tiers.map(tier => {
                     const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
                     return {
@@ -1518,7 +918,6 @@ app.post(
                     };
                 });
 
-                // Validar datas
                 const salesStartDate = new Date(parsedOnChainData.salesStartDate);
                 const salesEndDate = new Date(parsedOnChainData.salesEndDate);
                 
@@ -1529,61 +928,52 @@ app.post(
                     });
                 }
 
-                // 6. **FLUXO AUTOMÁTICO: Criar e assinar transação automaticamente**
                 console.log(' -> Construindo transação...');
+                const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
 
-// Obter blockhash mais recente
-const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
+                const transaction = await program.methods
+                    .createEvent(
+                        eventId, 
+                        metadataUrl, 
+                        new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
+                        new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
+                        parseInt(parsedOnChainData.royaltyBps, 10), 
+                        parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
+                        tiersInput
+                    )
+                    .accounts({
+                        whitelistAccount: whitelistPda,
+                        eventAccount: eventPda,
+                        controller: controllerPubkey,
+                        payer: payerKeypair.publicKey,
+                        systemProgram: SystemProgram.programId,
+                    })
+                    .transaction();
 
-// Construir transação
-const transaction = await program.methods
-    .createEvent(
-        eventId, 
-        metadataUrl, 
-        new anchor.BN(Math.floor(salesStartDate.getTime() / 1000)), 
-        new anchor.BN(Math.floor(salesEndDate.getTime() / 1000)), 
-        parseInt(parsedOnChainData.royaltyBps, 10), 
-        parseInt(parsedOnChainData.maxTicketsPerWallet, 10), 
-        tiersInput
-    )
-    .accounts({
-        whitelistAccount: whitelistPda,
-        eventAccount: eventPda,
-        controller: controllerPubkey,
-        payer: payerKeypair.publicKey,
-        systemProgram: SystemProgram.programId, // ✅ Already using Solana's SystemProgram
-    })
-    .transaction();
+                transaction.recentBlockhash = blockhash;
+                transaction.feePayer = payerKeypair.publicKey;
 
-// Configurar transação
-transaction.recentBlockhash = blockhash;
-transaction.feePayer = payerKeypair.publicKey;
+                console.log(' -> Assinando transação com a carteira da API...');
+                transaction.sign(payerKeypair);
 
-// ASSINATURA AUTOMÁTICA: A API assina como payer
-console.log(' -> Assinando transação com a carteira da API...');
-transaction.sign(payerKeypair);
+                console.log(' -> Enviando transação para a blockchain...');
+                const signature = await program.provider.connection.sendRawTransaction(
+                    transaction.serialize(),
+                    { skipPreflight: false, preflightCommitment: 'confirmed' }
+                );
 
-// ✅ CORREÇÃO: Usar o método correto do Solana Web3.js
-console.log(' -> Enviando transação para a blockchain...');
-const signature = await program.provider.connection.sendRawTransaction(
-    transaction.serialize(),
-    { skipPreflight: false, preflightCommitment: 'confirmed' }
-);
+                const confirmation = await program.provider.connection.confirmTransaction({
+                    signature,
+                    blockhash,
+                    lastValidBlockHeight,
+                }, 'confirmed');
 
-// Then confirm the transaction
-const confirmation = await program.provider.connection.confirmTransaction({
-    signature,
-    blockhash,
-    lastValidBlockHeight,
-}, 'confirmed');
-
-if (confirmation.value.err) {
-    throw new Error(`Transaction failed: ${confirmation.value.err}`);
-}
+                if (confirmation.value.err) {
+                    throw new Error(`Transaction failed: ${confirmation.value.err}`);
+                }
 
                 console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
                 
-                // Aguardar confirmação
                 console.log(' -> Aguardando confirmação...');
                 await program.provider.connection.confirmTransaction({
                     signature,
@@ -1593,7 +983,6 @@ if (confirmation.value.err) {
 
                 console.log(`[🎉] Transação confirmada! Evento criado em: ${eventPda.toString()}`);
 
-                // Retornar sucesso
                 res.status(200).json({ 
                     success: true, 
                     signature, 
@@ -1611,7 +1000,6 @@ if (confirmation.value.err) {
         } catch (error) {
             console.error("❌ Erro no processo de criação completo do evento:", error);
             
-            // Log detalhado para debugging
             if (error.logs) {
                 console.error('Logs da transação:', error.logs);
             }
@@ -1624,16 +1012,8 @@ if (confirmation.value.err) {
         }
     }
 );
+
 // --- SERVER INITIALIZATION ---
 app.listen(PORT, () => {
     console.log(`🚀 Gasless server running on port ${PORT}`);
 });
-
-
-
-
-
-
-
-
-

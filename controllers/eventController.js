@@ -21,6 +21,7 @@ export const createFullEvent = async (req, res) => {
         let imageUrl = parsedOffChainData.image;
         let organizerLogoUrl = parsedOffChainData.organizer.organizerLogo;
 
+        // Upload da imagem principal
         if (files.image?.[0]) {
             console.log(' -> Fazendo upload da imagem do evento...');
             imageUrl = await uploadToPinata(files.image[0]);
@@ -33,6 +34,7 @@ export const createFullEvent = async (req, res) => {
             });
         }
 
+        // Upload do logo do organizador (opcional)
         if (files.organizerLogo?.[0]) {
             console.log(' -> Fazendo upload do logo do organizador...');
             organizerLogoUrl = await uploadToPinata(files.organizerLogo[0]);
@@ -41,6 +43,7 @@ export const createFullEvent = async (req, res) => {
             organizerLogoUrl = '';
         }
 
+        // Preparar metadados finais
         const finalMetadata = {
             ...parsedOffChainData,
             image: imageUrl,
@@ -60,6 +63,7 @@ export const createFullEvent = async (req, res) => {
             createdBy: controllerPubkey.toString()
         };
         
+        // Upload dos metadados para IPFS
         console.log(' -> Fazendo upload do JSON de metadados...');
         const metadataUrl = await uploadJSONToPinata(finalMetadata);
         console.log(` -> Metadados enviados: ${metadataUrl}`);
@@ -67,6 +71,7 @@ export const createFullEvent = async (req, res) => {
         console.log(' -> Preparando transação on-chain...');
         const eventId = new anchor.BN(Date.now());
         
+        // Encontrar PDAs
         const [whitelistPda] = PublicKey.findProgramAddressSync(
             [Buffer.from("whitelist"), controllerPubkey.toBuffer()], 
             program.programId
@@ -76,6 +81,7 @@ export const createFullEvent = async (req, res) => {
             program.programId
         );
         
+        // Preparar tiers
         const tiersInput = parsedOnChainData.tiers.map(tier => {
             const priceBRLCents = Math.round(parseFloat(tier.price) * 100);
             return {
@@ -85,6 +91,7 @@ export const createFullEvent = async (req, res) => {
             };
         });
 
+        // Validar datas de venda
         const salesStartDate = new Date(parsedOnChainData.salesStartDate);
         const salesEndDate = new Date(parsedOnChainData.salesEndDate);
         
@@ -98,10 +105,12 @@ export const createFullEvent = async (req, res) => {
         console.log(' -> Construindo transação...');
         
         // Obter o blockhash mais recente
-        const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
 
-        // Criar a transação usando o método do Anchor
-        const tx = await program.methods
+        // **MÉTODO CORRETO: Usar program.methods().rpc() para assinatura automática**
+        console.log(' -> Enviando transação para a blockchain (método automático)...');
+        
+        const signature = await program.methods
             .createEvent(
                 eventId, 
                 metadataUrl, 
@@ -118,46 +127,20 @@ export const createFullEvent = async (req, res) => {
                 payer: payerKeypair.publicKey,
                 systemProgram: SystemProgram.programId,
             })
-            .transaction();
-
-        // Definir o blockhash e fee payer
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = payerKeypair.publicKey;
-
-        console.log(' -> Assinando transação com a carteira da API...');
-        
-        // Assinar a transação
-        tx.sign(payerKeypair);
-
-        console.log(' -> Enviando transação para a blockchain...');
-        
-        // Serializar e enviar a transação
-        const serializedTx = tx.serialize();
-        const signature = await program.provider.connection.sendRawTransaction(
-            serializedTx,
-            {
-                skipPreflight: false,
-                preflightCommitment: 'confirmed',
-                maxRetries: 3
-            }
-        );
+            .rpc({
+                commitment: 'confirmed',
+                skipPreflight: false
+            });
 
         console.log(` -> Transação enviada: ${signature}`);
         console.log(' -> Aguardando confirmação...');
 
         // Aguardar confirmação
-        const confirmation = await program.provider.connection.confirmTransaction(
-            {
-                signature,
-                blockhash,
-                lastValidBlockHeight,
-            },
-            'confirmed'
-        );
-
-        if (confirmation.value.err) {
-            throw new Error(`Transação falhou: ${JSON.stringify(confirmation.value.err)}`);
-        }
+        await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        }, 'confirmed');
 
         console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
         console.log(`[🎉] Transação confirmada! Evento criado em: ${eventPda.toString()}`);
@@ -174,13 +157,25 @@ export const createFullEvent = async (req, res) => {
     } catch (error) {
         console.error("❌ Erro no processo de criação completo do evento:", error);
         
+        // Log detalhado para debugging
         if (error.logs) {
             console.error('Logs da transação:', error.logs);
         }
         
-        // Log mais detalhado para debugging
-        console.error('Stack trace:', error.stack);
+        if (error.message?.includes('Account does not exist')) {
+            return res.status(400).json({
+                success: false,
+                error: "Conta do usuário não encontrada na blockchain. Certifique-se de que a carteira possui algum SOL."
+            });
+        }
         
+        if (error.message?.includes('insufficient funds')) {
+            return res.status(400).json({
+                success: false,
+                error: "Fundos insuficientes na carteira do sistema para criar o evento."
+            });
+        }
+
         res.status(500).json({ 
             success: false, 
             error: error.message || 'Ocorreu um erro interno no servidor.',

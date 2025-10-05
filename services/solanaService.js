@@ -64,6 +64,7 @@ export {
     connection,
     program,
     payerKeypair,
+      getKeypairFromMnemonic, 
     SystemProgram,
     SYSVAR_RENT_PUBKEY,
     getAssociatedTokenAddress,

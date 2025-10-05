@@ -7,8 +7,8 @@ import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes/index.js';
 import fs from 'fs';
 import path from 'path';
 
-import { PROGRAM_ID, SOLANA_RPC_URL, PAYER_MNEMONIC, __dirname } from '../config/index.js';
-import { TOKEN_METADATA_PROGRAM_ID } from '../config/solana.js';
+import {  SOLANA_RPC_URL, PAYER_MNEMONIC, __dirname } from '../config/index.js';
+import {PROGRAM_ID, TOKEN_METADATA_PROGRAM_ID } from '../config/solana.js';
 
 const { Program, AnchorProvider, Wallet } = anchor;
 

@@ -50,7 +50,7 @@ anchor.setProvider(provider);
 // Load IDL
 let program;
 try {
-    const idlPath = path.resolve(__dirname, './ticketing_system.json');
+    const idlPath = path.resolve(__dirname, '../config/ticketing_system.json');
     const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8'));
     program = new anchor.Program(idl, PROGRAM_ID, provider);
     console.log(`[+] Solana service configured with program: ${PROGRAM_ID.toString()}`);

@@ -96,9 +96,12 @@ export const createFullEvent = async (req, res) => {
         }
 
         console.log(' -> Construindo transação...');
+        
+        // Obter o blockhash mais recente
         const { blockhash, lastValidBlockHeight } = await program.provider.connection.getLatestBlockhash('confirmed');
 
-        const transaction = await program.methods
+        // Criar a transação usando o método do Anchor
+        const tx = await program.methods
             .createEvent(
                 eventId, 
                 metadataUrl, 
@@ -117,37 +120,46 @@ export const createFullEvent = async (req, res) => {
             })
             .transaction();
 
-        transaction.recentBlockhash = blockhash;
-        transaction.feePayer = payerKeypair.publicKey;
+        // Definir o blockhash e fee payer
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = payerKeypair.publicKey;
 
         console.log(' -> Assinando transação com a carteira da API...');
-        transaction.sign(payerKeypair);
+        
+        // Assinar a transação
+        tx.sign(payerKeypair);
 
         console.log(' -> Enviando transação para a blockchain...');
+        
+        // Serializar e enviar a transação
+        const serializedTx = tx.serialize();
         const signature = await program.provider.connection.sendRawTransaction(
-            transaction.serialize(),
-            { skipPreflight: false, preflightCommitment: 'confirmed' }
+            serializedTx,
+            {
+                skipPreflight: false,
+                preflightCommitment: 'confirmed',
+                maxRetries: 3
+            }
         );
 
-        const confirmation = await program.provider.connection.confirmTransaction({
-            signature,
-            blockhash,
-            lastValidBlockHeight,
-        }, 'confirmed');
+        console.log(` -> Transação enviada: ${signature}`);
+        console.log(' -> Aguardando confirmação...');
+
+        // Aguardar confirmação
+        const confirmation = await program.provider.connection.confirmTransaction(
+            {
+                signature,
+                blockhash,
+                lastValidBlockHeight,
+            },
+            'confirmed'
+        );
 
         if (confirmation.value.err) {
-            throw new Error(`Transaction failed: ${confirmation.value.err}`);
+            throw new Error(`Transação falhou: ${JSON.stringify(confirmation.value.err)}`);
         }
 
         console.log(`[✔] Evento criado com sucesso! Assinatura: ${signature}`);
-        
-        console.log(' -> Aguardando confirmação...');
-        await program.provider.connection.confirmTransaction({
-            signature,
-            blockhash,
-            lastValidBlockHeight,
-        }, 'confirmed');
-
         console.log(`[🎉] Transação confirmada! Evento criado em: ${eventPda.toString()}`);
 
         res.status(200).json({ 
@@ -165,6 +177,9 @@ export const createFullEvent = async (req, res) => {
         if (error.logs) {
             console.error('Logs da transação:', error.logs);
         }
+        
+        // Log mais detalhado para debugging
+        console.error('Stack trace:', error.stack);
         
         res.status(500).json({ 
             success: false, 

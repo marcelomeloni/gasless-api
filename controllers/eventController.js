@@ -733,55 +733,47 @@ export const getActiveEventsFast = async (req, res) => {
 
 // Busca detalhes do evento - APENAS do Supabase
 export const getEventDetailsFast = async (req, res) => {
-    const { eventAddress } = req.params;
+  const { eventAddress } = req.params;
 
-    console.log(`[⚡] API RÁPIDA: Buscando evento ${eventAddress} do Supabase...`);
-    const startTime = Date.now();
+  try {
+    const event = await getEventFromSupabase(eventAddress);
 
-    try {
-        const event = await getEventFromSupabase(eventAddress);
+    const eventData = {
+      publicKey: event.event_address,
+      account: {
+        eventId: event.event_id,
+        controller: event.controller,
+        salesStartDate: { toNumber: () => event.sales_start_date },
+        salesEndDate: { toNumber: () => event.sales_end_date },
+        maxTicketsPerWallet: event.max_tickets_per_wallet,
+        royaltyBps: event.royalty_bps,
+        metadataUri: event.metadata_url,
+        tiers: event.tiers || []
+      },
+      metadata: event.metadata,
+      imageUrl: event.image_url,
+    };
 
-        // Estrutura dos dados do evento para retorno
-        const eventData = {
-            publicKey: event.event_address,
-            account: {
-                eventId: event.event_id,
-                controller: event.controller,
-                salesStartDate: { toNumber: () => event.sales_start_date },
-                salesEndDate: { toNumber: () => event.sales_end_date },
-                maxTicketsPerWallet: event.max_tickets_per_wallet,
-                royaltyBps: event.royalty_bps,
-                metadataUri: event.metadata_url,
-                tiers: event.tiers || []
-            },
-            metadata: event.metadata, // Todos os metadados do evento aqui
-            imageUrl: event.image_url
-        };
+    res.status(200).json({
+      success: true,
+      event: eventData
+    });
 
-        const duration = Date.now() - startTime;
-        console.log(`[⚡] API RÁPIDA: Evento retornado em ${duration}ms`);
-
-        res.status(200).json({
-            success: true,
-            event: eventData
-        });
-
-    } catch (error) {
-        console.error("[❌] Erro na API rápida de detalhes:", error);
-
-        if (error.code === 'PGRST116') { // Registro não encontrado
-            return res.status(404).json({
-                success: false,
-                error: "Evento não encontrado no banco de dados."
-            });
-        }
-
-        res.status(500).json({
-            success: false,
-            error: "Erro interno do servidor"
-        });
+  } catch (error) {
+    if (error.code === 'PGRST116') {
+      return res.status(404).json({
+        success: false,
+        error: "Evento não encontrado no banco de dados."
+      });
     }
+
+    res.status(500).json({
+      success: false,
+      error: "Erro interno do servidor"
+    });
+  }
 };
+
 
 
 // Busca eventos para gestão - APENAS do Supabase

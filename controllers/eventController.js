@@ -731,50 +731,193 @@ export const getActiveEventsFast = async (req, res) => {
     }
 };
 
-// Busca detalhes do evento - APENAS do Supabase
 export const getEventDetailsFast = async (req, res) => {
-  const { eventAddress } = req.params;
-
-  try {
-    const event = await getEventFromSupabase(eventAddress);
-
-    const eventData = {
-      publicKey: event.event_address,
-      account: {
-        eventId: event.event_id,
-        controller: event.controller,
-        salesStartDate: { toNumber: () => event.sales_start_date },
-        salesEndDate: { toNumber: () => event.sales_end_date },
-        maxTicketsPerWallet: event.max_tickets_per_wallet,
-        royaltyBps: event.royalty_bps,
-        metadataUri: event.metadata_url,
-        tiers: event.tiers || []
-      },
-      metadata: event.metadata,
-      imageUrl: event.image_url,
-    };
-
-    res.status(200).json({
-      success: true,
-      event: eventData
-    });
-
-  } catch (error) {
-    if (error.code === 'PGRST116') {
-      return res.status(404).json({
-        success: false,
-        error: "Evento não encontrado no banco de dados."
+    const { eventAddress } = req.params;
+    
+    if (!eventAddress) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'O endereço do evento é obrigatório.' 
       });
     }
-
-    res.status(500).json({
-      success: false,
-      error: "Erro interno do servidor"
-    });
-  }
-};
-
-
+  
+    console.log(`[🔍] BUSCA DIRETA NA BLOCKCHAIN: ${eventAddress}`);
+    const startTime = Date.now();
+  
+    try {
+      const eventPubkey = new PublicKey(eventAddress);
+      
+      // ✅ BUSCA DIRETA NA BLOCKCHAIN - SEM CACHE
+      console.log(' -> Buscando dados diretamente da blockchain...');
+      let blockchainAccount;
+      try {
+        blockchainAccount = await program.account.event.fetch(eventPubkey);
+        console.log(' ✅ Dados brutos da blockchain recebidos');
+        
+        // ✅ DEBUG: Log da estrutura completa
+        console.log('🔍 ESTRUTURA DO EVENTO NA BLOCKCHAIN:');
+        console.log('- eventId:', blockchainAccount.eventId?.toString());
+        console.log('- controller:', blockchainAccount.controller?.toString());
+        console.log('- totalTicketsSold:', blockchainAccount.totalTicketsSold?.toString());
+        console.log('- tiers count:', blockchainAccount.tiers?.length || 0);
+        
+        if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
+          blockchainAccount.tiers.forEach((tier, index) => {
+            console.log(`🎫 Tier ${index}:`);
+            console.log('   - name:', tier.name);
+            console.log('   - priceBrlCents:', tier.priceBrlCents?.toString());
+            console.log('   - maxTicketsSupply:', tier.maxTicketsSupply?.toString());
+            console.log('   - ticketsSold:', tier.ticketsSold?.toString());
+          });
+        }
+      } catch (error) {
+        console.error(' ❌ Erro ao buscar evento na blockchain:', error);
+        return res.status(404).json({
+          success: false,
+          error: "Evento não encontrado na blockchain."
+        });
+      }
+  
+      // ✅ Buscar metadados do Supabase apenas para display
+      let finalMetadata = {};
+      let finalImageUrl = '';
+  
+      try {
+        const supabaseEvent = await getEventFromSupabase(eventAddress);
+        finalMetadata = supabaseEvent.metadata || {};
+        finalImageUrl = supabaseEvent.image_url || '';
+        console.log(' ✅ Metadados do Supabase carregados (apenas para display)');
+      } catch (error) {
+        console.warn(' ⚠️  Supabase não disponível, usando metadados fallback');
+        finalMetadata = {
+          name: "Evento Sem Nome",
+          description: "Descrição não disponível",
+          properties: {}
+        };
+      }
+  
+      // ✅ CORREÇÃO CRÍTICA: Processar tiers DIRETAMENTE da blockchain
+      const formattedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
+        // ✅ EXTRAÇÃO DIRETA DOS VALORES - SEM ASSUNÇÕES
+        let priceBrlCents = 0;
+        let maxTicketsSupply = 0;
+        let ticketsSold = 0;
+  
+        // Tentar diferentes formas de extrair os valores
+        try {
+          // Método 1: Se for BN object
+          if (tier.priceBrlCents && typeof tier.priceBrlCents.toNumber === 'function') {
+            priceBrlCents = tier.priceBrlCents.toNumber();
+          } else if (tier.priceBrlCents !== undefined && tier.priceBrlCents !== null) {
+            // Método 2: Se já for número
+            priceBrlCents = Number(tier.priceBrlCents);
+          }
+  
+          if (tier.maxTicketsSupply && typeof tier.maxTicketsSupply.toNumber === 'function') {
+            maxTicketsSupply = tier.maxTicketsSupply.toNumber();
+          } else if (tier.maxTicketsSupply !== undefined && tier.maxTicketsSupply !== null) {
+            maxTicketsSupply = Number(tier.maxTicketsSupply);
+          }
+  
+          if (tier.ticketsSold && typeof tier.ticketsSold.toNumber === 'function') {
+            ticketsSold = tier.ticketsSold.toNumber();
+          } else if (tier.ticketsSold !== undefined && tier.ticketsSold !== null) {
+            ticketsSold = Number(tier.ticketsSold);
+          }
+        } catch (error) {
+          console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
+        }
+  
+        const ticketsRemaining = maxTicketsSupply - ticketsSold;
+        
+        console.log(`🎫 Tier ${index} processado:`, {
+          name: tier.name,
+          priceBrlCents,
+          maxTicketsSupply,
+          ticketsSold,
+          ticketsRemaining
+        });
+  
+        return {
+          name: tier.name || `Tier ${index + 1}`,
+          priceBrlCents: priceBrlCents,
+          maxTicketsSupply: maxTicketsSupply,
+          ticketsSold: ticketsSold,
+          ticketsRemaining: ticketsRemaining,
+          isSoldOut: ticketsSold >= maxTicketsSupply
+        };
+      });
+  
+      // ✅ Calcular totais baseados nos tiers processados
+      const totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+      const maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+  
+      // ✅ ESTRUTURA FINAL DO EVENTO
+      const eventData = {
+        publicKey: eventAddress,
+        account: {
+          // Dados básicos do evento
+          eventId: blockchainAccount.eventId,
+          controller: blockchainAccount.controller.toString(),
+          salesStartDate: blockchainAccount.salesStartDate,
+          salesEndDate: blockchainAccount.salesEndDate,
+          maxTicketsPerWallet: blockchainAccount.maxTicketsPerWallet?.toNumber?.() || 1,
+          royaltyBps: blockchainAccount.royaltyBps?.toNumber?.() || 0,
+          metadataUri: blockchainAccount.metadataUri,
+          
+          // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
+          tiers: formattedTiers,
+          
+          // Dados dinâmicos
+          totalTicketsSold: totalTicketsSold,
+          maxTotalSupply: maxTotalSupply,
+          revenue: blockchainAccount.revenue?.toNumber?.() || 0,
+          isActive: blockchainAccount.isActive,
+          canceled: blockchainAccount.canceled,
+          validators: (blockchainAccount.validators || []).map(v => v.toString()),
+          state: blockchainAccount.state
+        },
+        metadata: finalMetadata,
+        imageUrl: finalImageUrl,
+      };
+  
+      const duration = Date.now() - startTime;
+      console.log(`[✅] DETALHES CARREGADOS EM ${duration}ms`);
+      console.log(` -> Tiers processados: ${formattedTiers.length}`);
+      console.log(` -> Ingressos totais: ${totalTicketsSold}/${maxTotalSupply} vendidos`);
+      
+      // ✅ LOG FINAL PARA CONFIRMAÇÃO
+      formattedTiers.forEach((tier, index) => {
+        console.log(`   Tier "${tier.name}": ${tier.ticketsSold}/${tier.maxTicketsSupply} vendidos`);
+      });
+  
+      res.status(200).json({
+        success: true,
+        event: eventData,
+        dataSources: {
+          blockchain: true,
+          tiersSource: 'blockchain-diret',
+          metadataSource: 'supabase'
+        }
+      });
+  
+    } catch (error) {
+      console.error("[❌] Erro crítico ao buscar detalhes do evento:", error);
+  
+      if (error.message.includes('Invalid public key')) {
+        return res.status(400).json({
+          success: false,
+          error: 'O endereço do evento fornecido é inválido.'
+        });
+      }
+  
+      res.status(500).json({
+        success: false,
+        error: 'Ocorreu um erro no servidor ao buscar os dados do evento.',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  };
 
 // Busca eventos para gestão - APENAS do Supabase
 export const getEventsForManagementFast = async (req, res) => {

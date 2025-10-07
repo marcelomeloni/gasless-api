@@ -6,8 +6,13 @@ import {
     getEventForManagement, 
     getActiveEvents, 
     getEventDetails,
+    getNextFourEvents,
     sendSignedTransaction,
+ 
     addValidatorGasless,
+    getEventDetailsFast,
+    getEventsForManagementFast,
+    getActiveEventsFast,
     cancelEventGasless,
     removeValidatorGasless
 } from '../controllers/eventController.js';
@@ -23,7 +28,10 @@ router.post(
     ]),
     createFullEvent
 );
-
+router.get('/active/next-four', getNextFourEvents);
+router.get('/active/fast', getActiveEventsFast);
+router.get('/:eventAddress/fast', getEventDetailsFast);
+router.get('/manage/fast/:userPublicKey', getEventsForManagementFast);
 router.get('/active', getActiveEvents);
 router.get('/:eventAddress', getEventDetails);
 router.get('/manage/:eventAddress/:userPublicKey', getEventForManagement);

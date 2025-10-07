@@ -741,6 +741,7 @@ export const getEventDetailsFast = async (req, res) => {
     try {
         const event = await getEventFromSupabase(eventAddress);
 
+        // Estrutura dos dados do evento para retorno
         const eventData = {
             publicKey: event.event_address,
             account: {
@@ -753,7 +754,7 @@ export const getEventDetailsFast = async (req, res) => {
                 metadataUri: event.metadata_url,
                 tiers: event.tiers || []
             },
-            metadata: event.metadata, // ✅ TODOS os metadados já estão aqui
+            metadata: event.metadata, // Todos os metadados do evento aqui
             imageUrl: event.image_url
         };
 
@@ -781,6 +782,7 @@ export const getEventDetailsFast = async (req, res) => {
         });
     }
 };
+
 
 // Busca eventos para gestão - APENAS do Supabase
 export const getEventsForManagementFast = async (req, res) => {

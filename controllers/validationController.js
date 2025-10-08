@@ -4,7 +4,7 @@ import supabase from '../services/supabaseService.js';
 import anchor from '@coral-xyz/anchor';
 import { getKeypairFromPrivateKey, getKeypairFromSeedPhrase, getKeypairFromCredentials } from '../lib/authUtils.js';
 
-// Cache de keypairs para validadores (em produção, usar Redis ou database)
+// Cache de keypairs para validadores
 const validatorKeypairs = new Map();
 
 /**
@@ -152,7 +152,7 @@ async function performOnChainValidations(eventAddress, validatorAddress, mintAdd
 }
 
 /**
- * Cria e envia transação de validação
+ * Cria e envia transação de validação - CORRIGIDO
  */
 async function createAndSendValidationTransaction(
   program, 
@@ -164,16 +164,13 @@ async function createAndSendValidationTransaction(
 ) {
   console.log('[7/7] Preparando transação gasless...');
 
-  const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-
-  const transaction = new anchor.web3.Transaction({
-    feePayer: payerKeypair.publicKey,
-    recentBlockhash: latestBlockhash.blockhash,
-    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-  });
-
+  // ✅ CORREÇÃO: Usar approach similar ao frontend que funciona
   const nftTokenAddress = getAssociatedTokenAddressSync(mintAddress, ownerAddress);
-  const redeemInstruction = await program.methods.redeemTicket()
+  
+  console.log('[SolanaService] 🖊️ Criando transação via program.methods...');
+  
+  // ✅ CORREÇÃO: Criar transação usando o método do programa (como no frontend)
+  const transaction = await program.methods.redeemTicket()
     .accounts({
       ticket: ticketPda,
       event: eventAddress,
@@ -182,17 +179,40 @@ async function createAndSendValidationTransaction(
       nftToken: nftTokenAddress,
       nftMint: mintAddress,
     })
-    .instruction();
+    .transaction();
 
-  transaction.add(redeemInstruction);
+  // ✅ CORREÇÃO: Obter blockhash recente
+  const { blockhash } = await connection.getRecentBlockhash();
+  
+  // ✅ CORREÇÃO: Configurar feePayer e recentBlockhash na transação
+  transaction.feePayer = payerKeypair.publicKey;
+  transaction.recentBlockhash = blockhash;
+
+  console.log('[SolanaService] ✅ Transação criada, assinando...');
+
+  // ✅ CORREÇÃO: Assinar com ambos os keypairs
+  // O validador assina para autorizar a operação
+  // O payer assina para pagar a transação (gasless)
   transaction.sign(validatorKeypair, payerKeypair);
 
   console.log('[SolanaService] 🖊️ Enviando transação assinada...');
-  const signature = await connection.sendRawTransaction(transaction.serialize());
+  
+  // ✅ CORREÇÃO: Enviar transação serializada
+  const signature = await connection.sendRawTransaction(transaction.serialize(), {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed'
+  });
 
-  await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed');
+  console.log(`[VALIDATION] 📡 Transação enviada, aguardando confirmação: ${signature}`);
+
+  // ✅ CORREÇÃO: Confirmar transação
+  const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+  
+  if (confirmation.value.err) {
+    throw new Error(`Transação falhou na confirmação: ${confirmation.value.err}`);
+  }
+
   console.log(`[VALIDATION] ✅ Ingresso validado com sucesso! Assinatura: ${signature}`);
-
   return signature;
 }
 

@@ -9,6 +9,9 @@ const validatorKeypairs = new Map();
 /**
  * Busca informações do ingresso sem validar (para preview)
  */
+/**
+ * Busca informações do ingresso sem validar (para preview)
+ */
 export const getTicketInfo = async (req, res) => {
   const { registrationId } = req.params;
 
@@ -38,15 +41,23 @@ export const getTicketInfo = async (req, res) => {
       throw new Error(`Perfil do dono do ingresso não encontrado: ${profileError?.message || 'não existe'}`);
     }
 
-    // ETAPA 3: Buscar dados do evento
+    // ETAPA 3: Buscar dados do evento com tratamento de erro
     console.log('[3/4] Buscando dados do evento...');
     const eventAddress = new anchor.web3.PublicKey(registration.event_address);
-    const eventAccount = await program.account.event.fetch(eventAddress);
     
-    // Buscar metadados do evento se disponível
+    let eventAccount = null;
     let eventMetadata = {};
+    
     try {
-      // Supondo que você tenha os metadados do evento em outra tabela
+      eventAccount = await program.account.event.fetch(eventAddress);
+      console.log('[TICKET-INFO] ✅ Dados do evento carregados com sucesso');
+    } catch (error) {
+      console.warn('[TICKET-INFO] ❌ Não foi possível carregar dados on-chain do evento:', error.message);
+      // Continuamos mesmo sem os dados on-chain
+    }
+
+    // Buscar metadados do evento se disponível
+    try {
       const { data: eventData } = await supabase
         .from('events')
         .select('name, metadata')
@@ -55,6 +66,7 @@ export const getTicketInfo = async (req, res) => {
       
       if (eventData) {
         eventMetadata = eventData.metadata || {};
+        console.log('[TICKET-INFO] ✅ Metadados do evento encontrados');
       }
     } catch (error) {
       console.log('[TICKET-INFO] Metadados do evento não encontrados, usando dados básicos');
@@ -63,13 +75,14 @@ export const getTicketInfo = async (req, res) => {
     // ETAPA 4: Verificar status on-chain do ingresso
     console.log('[4/4] Verificando status do ingresso on-chain...');
     const mintAddress = new anchor.web3.PublicKey(registration.mint_address);
-    const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
-      program.programId
-    );
-
+    
     let isRedeemed = false;
     try {
+      const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
+        program.programId
+      );
+      
       const ticketAccount = await program.account.ticket.fetch(ticketPda);
       isRedeemed = ticketAccount.redeemed;
       console.log(`[TICKET-INFO] Status do ingresso: ${isRedeemed ? 'VALIDADO' : 'NÃO VALIDADO'}`);
@@ -77,6 +90,17 @@ export const getTicketInfo = async (req, res) => {
       console.warn('[TICKET-INFO] Não foi possível verificar status on-chain, assumindo não validado');
       isRedeemed = false;
     }
+
+    // ✅ CORREÇÃO: Usar operador de encadeamento opcional para evitar erros
+    const eventDetails = eventAccount ? {
+      totalTickets: eventAccount.totalTickets?.toString() || '0',
+      ticketsSold: eventAccount.ticketsSold?.toString() || '0',
+      validators: eventAccount.validators ? eventAccount.validators.map(v => v.toString()) : []
+    } : {
+      totalTickets: '0',
+      ticketsSold: '0',
+      validators: []
+    };
 
     // Consolidar dados para resposta
     const ticketInfo = {
@@ -89,14 +113,13 @@ export const getTicketInfo = async (req, res) => {
       mintAddress: registration.mint_address,
       isRedeemed,
       registrationDetails: registration.registration_details,
-      eventDetails: {
-        totalTickets: eventAccount.totalTickets.toString(),
-        ticketsSold: eventAccount.ticketsSold.toString(),
-        validators: eventAccount.validators.map(v => v.toString())
-      }
+      eventDetails
     };
 
     console.log(`[TICKET-INFO] ✅ Informações encontradas para: ${ticketInfo.participantName}`);
+    console.log(`[TICKET-INFO] - Evento: ${ticketInfo.eventName}`);
+    console.log(`[TICKET-INFO] - Status: ${ticketInfo.isRedeemed ? 'VALIDADO' : 'NÃO VALIDADO'}`);
+    console.log(`[TICKET-INFO] - Participante: ${ticketInfo.participantName}`);
     
     return res.status(200).json({
       success: true,
@@ -113,6 +136,9 @@ export const getTicketInfo = async (req, res) => {
       statusCode = 404;
     }
 
+    // Log mais detalhado para debugging
+    console.error("❌ Stack trace:", error.stack);
+    
     return res.status(statusCode).json({ 
       success: false, 
       error: "Falha ao buscar informações do ingresso.", 

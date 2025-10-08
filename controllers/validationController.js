@@ -99,23 +99,30 @@ export const validateById = async (req, res) => {
     console.log(`[VALIDATION] Validador: ${validatorAddress}, Tipo: ${authType}`);
 
     try {
-        // --- [1/7] & [2/7] Buscando registro no Supabase ---
-        console.log('[1/7] Buscando registro no Supabase...');
-        const registration = await getRegistrationById(registrationId);
+       console.log('[1/7] Buscando registro no Supabase...');
 
-        if (!registration) {
-            return res.status(404).json({ success: false, error: "Registro do ingresso não encontrado." });
-        }
+// ✅ CORREÇÃO: Usando o cliente Supabase diretamente
+const { data: registration, error: dbError } = await supabase
+    .from('registrations') 
+    .select('*')
+    .eq('id', registrationId) 
+    .single();
 
-        console.log('[2/7] Registro encontrado:', {
-            event: registration.eventAddress,
-            mint: registration.nftMintAddress,
-            name: registration.participantName,
-        });
+if (dbError || !registration) {
+    console.error('[DB_ERROR] Erro ao buscar registro no Supabase:', dbError?.message);
+    return res.status(404).json({ success: false, error: "Registro do ingresso não encontrado." });
+}
 
-        const eventAddress = new web3.PublicKey(registration.eventAddress);
-        const nftMintAddress = new web3.PublicKey(registration.nftMintAddress);
-        const ownerAddress = new web3.PublicKey(registration.ownerAddress);
+// ✅ CORREÇÃO: Usando os nomes das colunas do banco de dados (snake_case)
+console.log('[2/7] Registro encontrado:', {
+    event: registration.event_address,
+    mint: registration.nft_mint_address,
+    name: registration.participant_name,
+});
+
+const eventAddress = new web3.PublicKey(registration.event_address);
+const nftMintAddress = new web3.PublicKey(registration.nft_mint_address);
+const ownerAddress = new web3.PublicKey(registration.owner_address);
 
         // --- [3/7] & [4/7] Validando endereços e permissões ---
         console.log('[3/7] Validando endereços...');

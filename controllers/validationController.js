@@ -100,7 +100,7 @@ export const validateById = async (req, res) => {
 
     try {
         // --- [1/7] Buscando o registro do ingresso ---
-        console.log('[1/7] Buscando registro no Supabase...');
+        console.log('[1/7] Buscando registro na tabela `registrations`...');
         const { data: registration, error: regError } = await supabase
             .from('registrations')
             .select('*')
@@ -113,7 +113,7 @@ export const validateById = async (req, res) => {
         }
 
         // --- [2/7] Buscando o perfil do dono do ingresso ---
-        console.log(`[2/7] Buscando perfil do dono (ID: ${registration.profile_id})...`);
+        console.log(`[2/7] Buscando perfil na tabela \`profiles\` (ID: ${registration.profile_id})...`);
         const { data: profile, error: profileError } = await supabase
             .from('profiles')
             .select('wallet_address') // Só precisamos do endereço da carteira
@@ -129,9 +129,10 @@ export const validateById = async (req, res) => {
         const eventAddressStr = registration.event_address;
         const mintAddressStr = registration.mint_address;
         const ownerAddressStr = profile.wallet_address;
+        // Buscando o nome do participante de dentro do JSON 'registration_details'
         const participantName = registration.registration_details?.name || 'Participante';
 
-        console.log('[2.5/7] Dados encontrados:', {
+        console.log('[2.5/7] Dados combinados com sucesso:', {
             event: eventAddressStr,
             mint: mintAddressStr,
             owner: ownerAddressStr,
@@ -139,7 +140,7 @@ export const validateById = async (req, res) => {
         });
 
         if (!eventAddressStr || !mintAddressStr || !ownerAddressStr) {
-            return res.status(400).json({ success: false, error: "Dados do registro estão incompletos (endereços faltando)." });
+            return res.status(400).json({ success: false, error: "Dados críticos (endereços de evento, mint ou dono) estão faltando no banco de dados." });
         }
 
         const eventAddress = new anchor.web3.PublicKey(eventAddressStr);
@@ -147,8 +148,7 @@ export const validateById = async (req, res) => {
         const ownerAddress = new anchor.web3.PublicKey(ownerAddressStr);
         
         // --- [3/7] & [4/7] Validando endereços e permissões ---
-        // (O restante do código continua igual, usando as variáveis corretas)
-        console.log('[3/7] Validando endereços...');
+        console.log('[3/7] Buscando conta do evento on-chain...');
         const eventAccount = await program.account.event.fetch(eventAddress);
 
         console.log('[4/7] Verificando permissões do validador...');
@@ -159,7 +159,7 @@ export const validateById = async (req, res) => {
         console.log(`[VALIDATION] ✅ Validador ${validatorAddress} autorizado.`);
 
         // --- [5/7] Buscando ingresso on-chain ---
-        console.log('[5/7] Buscando ingresso on-chain...');
+        console.log('[5/7] Buscando conta do ingresso on-chain...');
         const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
             [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
             program.programId
@@ -177,7 +177,6 @@ export const validateById = async (req, res) => {
 
         // --- [7/7] Executando validação GASLESS ---
         console.log('[7/7] Preparando transação gasless...');
-
         const nftTokenAddress = getAssociatedTokenAddressSync(mintAddress, ownerAddress);
 
         const accounts = {
@@ -186,7 +185,7 @@ export const validateById = async (req, res) => {
             validator: validatorKeypair.publicKey,
             owner: ownerAddress,
             nftToken: nftTokenAddress,
-            nftMint: mintAddress, // Corrigido para nftMint
+            nftMint: mintAddress,
         };
         
         const redeemInstruction = await program.methods
@@ -208,12 +207,7 @@ export const validateById = async (req, res) => {
         console.log('[SolanaService] 🖊️ Enviando transação assinada...');
         const signature = await connection.sendRawTransaction(rawTransaction);
 
-        await connection.confirmTransaction({
-            signature,
-            blockhash: latestBlockhash.blockhash,
-            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        }, 'confirmed');
-
+        await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed');
         console.log(`[VALIDATION] ✅ Ingresso validado com sucesso! Assinatura: ${signature}`);
 
         return res.status(200).json({
@@ -227,7 +221,7 @@ export const validateById = async (req, res) => {
         console.error("❌ Erro detalhado durante a validação:", error);
         let errorMessage = "Ocorreu um erro desconhecido durante a validação.";
         if (error.message) { errorMessage = error.message; }
-        if (error.logs) { console.error('--- LOGS DA BLOCKCHAIN ---'); console.error(error.logs); console.error('-------------------------'); }
+        if (error.logs) { console.error('--- LOGS DA BLOCKCHAIN ---', error.logs, '-------------------------'); }
         return res.status(500).json({ success: false, error: "Falha na validação do ingresso.", details: errorMessage });
     }
 };

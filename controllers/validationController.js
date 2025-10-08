@@ -86,18 +86,6 @@ async function createAndSignValidationTransaction(program, accounts, validatorKe
   }
 }
 
-/**
- * Valida um ingresso por ID (assinatura backend)
- */
-import { web3 } from '@coral-xyz/anchor';
-import { getAssociatedTokenAddressSync } from '@solana/spl-token';
-
-// --- Importações dos seus serviços e configurações ---
-// (Adapte os caminhos conforme sua estrutura)
-import { program, connection } from '../services/solanaService.js';
-import { payerKeypair } from '../services/payerService.js'; // Onde você carrega o payerKeypair
-import { getRegistrationById } from '../services/supabaseService.js'; // Sua função para buscar no Supabase
-import { getValidatorKeypair } from '../services/authService.js'; // Sua função para derivar o keypair do validador
 
 /**
  * Valida um ingresso por ID de registro (UUID), usando a carteira central 'Payer'

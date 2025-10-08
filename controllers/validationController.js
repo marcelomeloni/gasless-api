@@ -99,35 +99,55 @@ export const validateById = async (req, res) => {
     console.log(`[VALIDATION] Validador: ${validatorAddress}, Tipo: ${authType}`);
 
     try {
+        // --- [1/7] Buscando o registro do ingresso ---
         console.log('[1/7] Buscando registro no Supabase...');
-        const { data: registration, error: dbError } = await supabase
+        const { data: registration, error: regError } = await supabase
             .from('registrations')
             .select('*')
             .eq('id', registrationId)
             .single();
 
-        if (dbError || !registration) {
-            console.error('[DB_ERROR] Erro ao buscar registro no Supabase:', dbError?.message);
+        if (regError || !registration) {
+            console.error('[DB_ERROR] Erro ao buscar registro:', regError?.message);
             return res.status(404).json({ success: false, error: "Registro do ingresso não encontrado." });
         }
 
-        console.log('[2/7] Registro encontrado:', {
-            event: registration.event_address,
-            mint: registration.nft_mint_address,
-            name: registration.participant_name,
-        });
-        
-        // Verificação de dados para evitar crash
-        if (!registration.event_address || !registration.nft_mint_address || !registration.owner_address) {
-            return res.status(400).json({ success: false, error: "Dados do registro estão incompletos no banco de dados (endereços faltando)." });
+        // --- [2/7] Buscando o perfil do dono do ingresso ---
+        console.log(`[2/7] Buscando perfil do dono (ID: ${registration.profile_id})...`);
+        const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('wallet_address') // Só precisamos do endereço da carteira
+            .eq('id', registration.profile_id)
+            .single();
+
+        if (profileError || !profile) {
+            console.error('[DB_ERROR] Erro ao buscar perfil do dono:', profileError?.message);
+            return res.status(404).json({ success: false, error: "Perfil do dono do ingresso não encontrado." });
         }
 
-        // ✅ CORREÇÃO: Usando anchor.web3
-        const eventAddress = new anchor.web3.PublicKey(registration.event_address);
-        const nftMintAddress = new anchor.web3.PublicKey(registration.nft_mint_address);
-        const ownerAddress = new anchor.web3.PublicKey(registration.owner_address);
+        // --- Extraindo e validando os dados ---
+        const eventAddressStr = registration.event_address;
+        const mintAddressStr = registration.mint_address;
+        const ownerAddressStr = profile.wallet_address;
+        const participantName = registration.registration_details?.name || 'Participante';
 
+        console.log('[2.5/7] Dados encontrados:', {
+            event: eventAddressStr,
+            mint: mintAddressStr,
+            owner: ownerAddressStr,
+            name: participantName,
+        });
+
+        if (!eventAddressStr || !mintAddressStr || !ownerAddressStr) {
+            return res.status(400).json({ success: false, error: "Dados do registro estão incompletos (endereços faltando)." });
+        }
+
+        const eventAddress = new anchor.web3.PublicKey(eventAddressStr);
+        const mintAddress = new anchor.web3.PublicKey(mintAddressStr);
+        const ownerAddress = new anchor.web3.PublicKey(ownerAddressStr);
+        
         // --- [3/7] & [4/7] Validando endereços e permissões ---
+        // (O restante do código continua igual, usando as variáveis corretas)
         console.log('[3/7] Validando endereços...');
         const eventAccount = await program.account.event.fetch(eventAddress);
 
@@ -140,9 +160,8 @@ export const validateById = async (req, res) => {
 
         // --- [5/7] Buscando ingresso on-chain ---
         console.log('[5/7] Buscando ingresso on-chain...');
-        // ✅ CORREÇÃO: Usando anchor.web3
         const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
-            [Buffer.from("ticket"), eventAddress.toBuffer(), nftMintAddress.toBuffer()],
+            [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
             program.programId
         );
 
@@ -159,7 +178,7 @@ export const validateById = async (req, res) => {
         // --- [7/7] Executando validação GASLESS ---
         console.log('[7/7] Preparando transação gasless...');
 
-        const nftTokenAddress = getAssociatedTokenAddressSync(nftMintAddress, ownerAddress);
+        const nftTokenAddress = getAssociatedTokenAddressSync(mintAddress, ownerAddress);
 
         const accounts = {
             ticket: ticketPda,
@@ -167,7 +186,7 @@ export const validateById = async (req, res) => {
             validator: validatorKeypair.publicKey,
             owner: ownerAddress,
             nftToken: nftTokenAddress,
-            nftMint: nftMintAddress,
+            nftMint: mintAddress, // Corrigido para nftMint
         };
         
         const redeemInstruction = await program.methods
@@ -176,8 +195,6 @@ export const validateById = async (req, res) => {
             .instruction();
 
         const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-
-        // ✅ CORREÇÃO: Usando anchor.web3
         const transaction = new anchor.web3.Transaction({
             recentBlockhash: latestBlockhash.blockhash,
             lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
@@ -201,15 +218,13 @@ export const validateById = async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: `Entrada liberada para ${registration.participant_name || 'Participante'}!`,
+            message: `Entrada liberada para ${participantName}!`,
             signature: signature,
-            participantName: registration.participant_name || 'Participante',
+            participantName: participantName,
         });
 
     } catch (error) {
-        // ... seu bloco catch continua igual
         console.error("❌ Erro detalhado durante a validação:", error);
-        // ...
         let errorMessage = "Ocorreu um erro desconhecido durante a validação.";
         if (error.message) { errorMessage = error.message; }
         if (error.logs) { console.error('--- LOGS DA BLOCKCHAIN ---'); console.error(error.logs); console.error('-------------------------'); }

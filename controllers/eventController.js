@@ -694,14 +694,20 @@ export const addValidatorGasless = async (req, res) => {
     }
 };
 export const getActiveEventsFast = async (req, res) => {
-    console.log('[⚡] API RÁPIDA: Buscando eventos ativos do Supabase...');
+    console.log('[⚡] API RÁPIDA: Buscando eventos ATIVOS (Supabase + Blockchain)...');
     const startTime = Date.now();
 
     try {
+        // 1. Buscar eventos ativos do Supabase (já filtrado por is_active = true)
         const events = await getActiveEventsFromSupabase();
+        console.log(`[⚡] Encontrados ${events.length} eventos ATIVOS no Supabase`);
 
-        // Formatar resposta (já tem todos os dados no metadata)
-        const formattedEvents = events.map(event => ({
+        // 2. Buscar dados dos tiers na blockchain em paralelo
+        console.log(' -> Buscando preços e supply na blockchain...');
+        const eventsWithBlockchainData = await fetchEventsBlockchainData(events);
+
+        // 3. Formatar resposta combinando dados
+        const formattedEvents = eventsWithBlockchainData.map(event => ({
             publicKey: event.event_address,
             account: {
                 eventId: event.event_id,
@@ -710,22 +716,45 @@ export const getActiveEventsFast = async (req, res) => {
                 salesEndDate: { toNumber: () => event.sales_end_date },
                 maxTicketsPerWallet: event.max_tickets_per_wallet,
                 royaltyBps: event.royalty_bps,
-                metadataUri: event.metadata_url, // Ainda mantemos por compatibilidade
-                tiers: event.tiers || []
+                metadataUri: event.metadata_url,
+                // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
+                tiers: event.blockchainTiers || [],
+                // ✅ DADOS DINÂMICOS DA BLOCKCHAIN
+                totalTicketsSold: event.totalTicketsSold || 0,
+                maxTotalSupply: event.maxTotalSupply || 0,
+                // ✅ NOVO: Status do evento da blockchain
+                isActive: event.is_active !== undefined ? event.is_active : true,
+                canceled: event.canceled || false
             },
-            metadata: event.metadata, // ✅ JÁ TEM TODOS OS DADOS: nome, descrição, imagem, etc
-            imageUrl: event.image_url
+            metadata: event.metadata,
+            imageUrl: event.image_url,
+            // ✅ INFORMAÇÕES DE PREÇOS E SUPPLY
+            ticketInfo: {
+                totalTicketsSold: event.totalTicketsSold || 0,
+                maxTotalSupply: event.maxTotalSupply || 0,
+                ticketsAvailable: event.ticketsAvailable || 0,
+                startingPrice: event.startingPrice || 0,
+                tiersCount: event.tiersCount || 0
+            },
+            // ✅ NOVO: Status do evento
+            isActive: event.is_active !== undefined ? event.is_active : true,
+            isCanceled: event.canceled || false
         }));
 
         const duration = Date.now() - startTime;
-        console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos retornados em ${duration}ms`);
+        console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos ATIVOS processados em ${duration}ms`);
+        
+        // Log resumo
+        const totalTickets = formattedEvents.reduce((sum, event) => sum + event.ticketInfo.totalTicketsSold, 0);
+        const totalSupply = formattedEvents.reduce((sum, event) => sum + event.ticketInfo.maxTotalSupply, 0);
+        console.log(`[📊] RESUMO: ${totalTickets}/${totalSupply} ingressos vendidos no total`);
 
         res.status(200).json(formattedEvents);
 
     } catch (error) {
-        console.error("[❌] Erro na API rápida de eventos:", error);
+        console.error("[❌] Erro na API rápida de eventos ativos:", error);
         res.status(500).json({
-            error: "Erro ao buscar eventos",
+            error: "Erro ao buscar eventos ativos",
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }

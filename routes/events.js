@@ -8,7 +8,7 @@ import {
     getEventDetails,
     getNextFourEvents,
     sendSignedTransaction,
- 
+ getEventFromSupabase,
     addValidatorGasless,
     getEventDetailsFast,
     getEventsForManagementFast,
@@ -28,6 +28,7 @@ router.post(
     ]),
     createFullEvent
 );
+router.get('/supabase/:eventAddress', getEventFromSupabase);
 router.get('/active/next-four', getNextFourEvents);
 router.get('/active/fast', getActiveEventsFast);
 router.get('/:eventAddress/fast', getEventDetailsFast);

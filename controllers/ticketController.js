@@ -406,17 +406,76 @@ export const getTicketData = async (req, res) => {
         try {
             const { data: profile } = await supabase.from('profiles').select('name').eq('wallet_address', ownerPublicKey.toString()).single();
             if (profile) ownerName = profile.name;
-        } catch (e) { console.warn(`-> Supabase profile not found for owner ${ownerPublicKey.toString()}`); }
+        } catch (e) { 
+            console.warn(`-> Supabase profile not found for owner ${ownerPublicKey.toString()}`);
+        }
 
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), ownerPublicKey.toBuffer()], program.programId);
         let userProfile = null;
-        try { userProfile = await program.account.userProfile.fetch(userProfilePda); }
-        catch (e) { console.warn(`-> On-chain profile not found for owner ${ownerPublicKey.toString()}`); }
+        try { 
+            userProfile = await program.account.userProfile.fetch(userProfilePda); 
+        } catch (e) { 
+            console.warn(`-> On-chain profile not found for owner ${ownerPublicKey.toString()}`);
+        }
 
+        // Buscar dados do evento
         const eventAccountData = await program.account.event.fetch(eventPublicKey);
-        const metadataResponse = await fetch(eventAccountData.metadataUri);
-        if (!metadataResponse.ok) throw new Error("Failed to fetch event metadata.");
-        const eventMetadata = await metadataResponse.json();
+        
+        let eventMetadata = { name: "Evento" };
+        let eventName = "Evento";
+        
+        // **CORREÇÃO: Buscar metadata do evento do banco de dados**
+        try {
+            const { data: dbEvent, error: dbError } = await supabase
+                .from('events') // Assumindo que a tabela se chama 'events'
+                .select('registration_details, name') // Buscar registration_details e name
+                .eq('event_address', eventPublicKey.toString())
+                .single();
+
+            if (!dbError && dbEvent) {
+                console.log(`[+] Found event in database:`, dbEvent);
+                
+                // Se registration_details existe e tem dados, usar como metadata
+                if (dbEvent.registration_details && typeof dbEvent.registration_details === 'object') {
+                    eventMetadata = dbEvent.registration_details;
+                    
+                    // Tentar extrair o nome do evento de várias fontes possíveis
+                    eventName = dbEvent.name || 
+                               dbEvent.registration_details.eventName || 
+                               dbEvent.registration_details.name || 
+                               eventAccountData.name || 
+                               "Evento Especial";
+                } else {
+                    // Se não tem registration_details, usar o nome direto da tabela
+                    eventName = dbEvent.name || eventAccountData.name || "Evento Especial";
+                    eventMetadata.name = eventName;
+                }
+            } else {
+                console.warn(`[!] Event not found in database for address ${eventPublicKey.toString()}`);
+                
+                // Fallback: tentar buscar do metadataUri da chain
+                if (eventAccountData.metadataUri) {
+                    try {
+                        const metadataResponse = await fetch(eventAccountData.metadataUri);
+                        if (metadataResponse.ok) {
+                            eventMetadata = await metadataResponse.json();
+                            eventName = eventMetadata.name || eventAccountData.name || "Evento Especial";
+                        }
+                    } catch (fetchError) {
+                        console.warn(`[!] Failed to fetch from metadataUri:`, fetchError.message);
+                    }
+                }
+                
+                // Último fallback: usar nome da conta da chain
+                if (eventAccountData.name) {
+                    eventName = eventAccountData.name;
+                    eventMetadata.name = eventName;
+                }
+            }
+        } catch (dbError) {
+            console.warn(`[!] Error querying database for event:`, dbError.message);
+            // Fallbacks similares ao acima...
+        }
 
         res.status(200).json({
             success: true, 
@@ -424,7 +483,14 @@ export const getTicketData = async (req, res) => {
             ownerName: ownerName,
             ticket: ticketAccount.account, 
             profile: userProfile,
-            event: { name: eventMetadata.name, metadata: eventMetadata }
+            event: { 
+                name: eventName, 
+                metadata: eventMetadata,
+                accountData: {
+                    name: eventAccountData.name,
+                    metadataUri: eventAccountData.metadataUri
+                }
+            }
         });
     } catch (error) {
         console.error("[✘] Error fetching ticket data:", error);

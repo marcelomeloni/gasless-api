@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import bip39 from 'bip39';
 import anchor from '@coral-xyz/anchor';
+import { supabase } from '../services/supabaseService.js';
 import { sendTicketEmail } from '../services/emailService.js';
 import { saveRegistrationData } from '../services/supabaseService.js';
 import { 

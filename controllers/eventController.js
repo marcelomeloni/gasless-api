@@ -1113,12 +1113,6 @@ export const getEventDetailsFast = async (req, res) => {
   }
 };
 
-// Exporta as funções para uso em outros lugares
-module.exports = {
-  getImagesWithFallback,
-  getAccessibleIpfsUrl,
-  extractCID
-};
 
 // Busca eventos para gestão - APENAS do Supabase
 export const getEventsForManagementFast = async (req, res) => {

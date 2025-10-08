@@ -9,17 +9,18 @@ import FormData from 'form-data';
 import { deriveUserKeypair } from '../services/walletDerivationService.js';
 
 export const getNextFourEvents = async (req, res) => {
-    console.log('[⚡] API ULTRA-RÁPIDA: Buscando 4 próximos eventos do Supabase...');
+    console.log('[⚡] API ULTRA-RÁPIDA: Buscando 4 próximos eventos ATIVOS do Supabase...');
     const startTime = Date.now();
     
     try {
         const nowInSeconds = Math.floor(Date.now() / 1000);
         
-        // Buscar apenas 4 eventos mais próximos do Supabase
+        // Buscar apenas 4 eventos ativos mais próximos do Supabase
         const { data, error } = await supabase
             .from('events')
             .select('*')
-            .gte('sales_end_date', nowInSeconds) // Eventos que ainda não terminaram
+            .eq('is_active', true)
+            .gte('sales_end_date', nowInSeconds)
             .order('sales_start_date', { ascending: true })
             .limit(4);
 
@@ -28,8 +29,40 @@ export const getNextFourEvents = async (req, res) => {
             throw error;
         }
 
+        // ✅ PROCESSAMENTO DE IMAGENS COM FALLBACK IPFS
+        const eventsWithFallbackImages = await Promise.all(
+            (data || []).map(async (event) => {
+                let processedImageUrl = event.image_url;
+                
+                // Aplica fallback IPFS se a URL for do Pinata
+                if (event.image_url && event.image_url.includes('pinata')) {
+                    try {
+                        const { getAccessibleIpfsUrl } = require('./ipfsFallback'); // ajuste o caminho
+                        processedImageUrl = await getAccessibleIpfsUrl(event.image_url);
+                        console.log(`   ✅ Imagem processada: ${event.image_url} -> ${processedImageUrl}`);
+                    } catch (ipfsError) {
+                        console.warn(`   ⚠️  Erro no fallback IPFS: ${ipfsError.message}`);
+                    }
+                }
+                
+                return {
+                    ...event,
+                    image_url: processedImageUrl
+                };
+            })
+        );
+
+        console.log(`[📋] ${eventsWithFallbackImages.length} eventos ativos encontrados:`);
+        if (eventsWithFallbackImages.length > 0) {
+            eventsWithFallbackImages.forEach((event, index) => {
+                const eventName = event.metadata?.name || 'Sem nome';
+                const startDate = new Date(event.sales_start_date * 1000).toLocaleDateString();
+                console.log(`   ${index + 1}. "${eventName}" | Início: ${startDate}`);
+            });
+        }
+
         // Formatar resposta
-        const formattedEvents = (data || []).map(event => ({
+        const formattedEvents = eventsWithFallbackImages.map(event => ({
             publicKey: event.event_address,
             account: {
                 eventId: event.event_id,
@@ -41,12 +74,14 @@ export const getNextFourEvents = async (req, res) => {
                 metadataUri: event.metadata_url,
                 tiers: event.tiers || []
             },
-            metadata: event.metadata, // ✅ TODOS os dados já aqui
-            imageUrl: event.image_url
+            metadata: event.metadata,
+            imageUrl: event.image_url, // ✅ Já com fallback aplicado
+            isActive: event.is_active,
+            isCanceled: !event.is_active
         }));
 
         const duration = Date.now() - startTime;
-        console.log(`[⚡] API ULTRA-RÁPIDA: ${formattedEvents.length} eventos retornados em ${duration}ms`);
+        console.log(`[⚡] API ULTRA-RÁPIDA: ${formattedEvents.length} eventos ATIVOS retornados em ${duration}ms`);
         
         res.status(200).json(formattedEvents);
 

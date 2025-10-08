@@ -3,7 +3,7 @@ import { uploadToPinata, uploadJSONToPinata } from '../services/pinataService.js
 import anchor from '@coral-xyz/anchor';
 import { createClient } from '@supabase/supabase-js';
 import { saveCompleteEventToSupabase, getActiveEventsFromSupabase, getEventsByCreator, getEventFromSupabase, supabase  } from '../services/supabaseService.js';
-
+import axios from 'axios';
 import { Transaction } from '@solana/web3.js';
 import FormData from 'form-data';
 import { deriveUserKeypair } from '../services/walletDerivationService.js';
@@ -731,7 +731,7 @@ export const getActiveEventsFast = async (req, res) => {
     }
 };
 
-const axios = require('axios');
+
 
 // Lista de gateways IPFS em ordem de prioridade
 const IPFS_GATEWAYS = [

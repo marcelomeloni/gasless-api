@@ -732,127 +732,60 @@ export const getActiveEventsFast = async (req, res) => {
     console.log('[⚡] API RÁPIDA: Buscando eventos ativos (Supabase + Blockchain)...');
     const startTime = Date.now();
 
-    // ✅ MOVA A FUNÇÃO fetchEventsBlockchainData PARA DENTRO AQUI
-    const fetchEventsBlockchainData = async (events) => {
-        const concurrencyLimit = 6;
-        const semaphore = new Semaphore(concurrencyLimit);
-        
-        const promises = events.map(async (event) => {
-            await semaphore.acquire();
-            try {
-                const eventAddress = new PublicKey(event.event_address);
-                
-                // ✅ BUSCA DIRETA NA BLOCKCHAIN
-                const blockchainAccount = await program.account.event.fetch(eventAddress);
-                
-                // ✅ PROCESSAR TIERS DA BLOCKCHAIN
-                const processedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
-                    const extractValue = (value) => {
-                        if (!value && value !== 0) return 0;
-                        
-                        if (value && typeof value === 'object') {
-                            if (typeof value.toNumber === 'function') {
-                                return value.toNumber();
-                            }
-                            if (value.hex && typeof value.hex === 'string') {
-                                return parseInt(value.hex, 16);
-                            }
-                            try {
-                                return Number(value);
-                            } catch (e) {
-                                console.warn(` ❌ Não foi possível converter valor:`, value);
-                                return 0;
-                            }
-                        }
-                        
-                        if (typeof value === 'string' && value.startsWith('0x')) {
-                            return parseInt(value, 16);
-                        }
-                        
-                        if (typeof value === 'string') {
-                            const num = Number(value);
-                            return isNaN(num) ? 0 : num;
-                        }
-                        
-                        return Number(value) || 0;
-                    };
-
-                    const priceBrlCents = extractValue(tier.priceBrlCents);
-                    const maxTicketsSupply = extractValue(tier.maxTicketsSupply);
-                    const ticketsSold = extractValue(tier.ticketsSold);
-                    const ticketsRemaining = maxTicketsSupply - ticketsSold;
-                    
-                    return {
-                        name: tier.name || `Tier ${index + 1}`,
-                        priceBrlCents: priceBrlCents,
-                        maxTicketsSupply: maxTicketsSupply,
-                        ticketsSold: ticketsSold,
-                        ticketsRemaining: ticketsRemaining,
-                        isSoldOut: ticketsSold >= maxTicketsSupply
-                    };
-                });
-
-                // ✅ CALCULAR TOTAIS
-                const totalTicketsSold = processedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
-                const maxTotalSupply = processedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
-                
-                // ✅ ENCONTRAR PREÇO INICIAL
-                const availableTiers = processedTiers.filter(tier => !tier.isSoldOut && tier.ticketsRemaining > 0);
-                const startingPrice = availableTiers.length > 0 
-                    ? Math.min(...availableTiers.map(tier => tier.priceBrlCents))
-                    : processedTiers.length > 0 
-                        ? Math.min(...processedTiers.map(tier => tier.priceBrlCents))
-                        : 0;
-
-                return {
-                    ...event,
-                    blockchainTiers: processedTiers,
-                    totalTicketsSold,
-                    maxTotalSupply,
-                    ticketsAvailable: maxTotalSupply - totalTicketsSold,
-                    startingPrice,
-                    tiersCount: processedTiers.length
-                };
-                
-            } catch (error) {
-                console.error(`[⚠️] Erro ao buscar dados blockchain para ${event.event_address}:`, error.message);
-                // Fallback: usar dados do Supabase
-                const supabaseTiers = event.tiers || [];
-                const totalTicketsSold = supabaseTiers.reduce((sum, tier) => sum + (tier.ticketsSold || 0), 0);
-                const maxTotalSupply = supabaseTiers.reduce((sum, tier) => sum + (tier.maxTicketsSupply || 0), 0);
-                
-                return {
-                    ...event,
-                    blockchainTiers: supabaseTiers,
-                    totalTicketsSold,
-                    maxTotalSupply,
-                    ticketsAvailable: maxTotalSupply - totalTicketsSold,
-                    startingPrice: supabaseTiers.length > 0 ? Math.min(...supabaseTiers.map(tier => tier.priceBrlCents || 0)) : 0,
-                    tiersCount: supabaseTiers.length,
-                    dataSource: 'supabase-fallback'
-                };
-            } finally {
-                semaphore.release();
-            }
-        });
-
-        const results = await Promise.allSettled(promises);
-        
-        return results
-            .filter(result => result.status === 'fulfilled')
-            .map(result => result.value);
-    };
-
     try {
         // 1. Buscar eventos ativos do Supabase
         const events = await getActiveEventsFromSupabase();
         console.log(`[⚡] Encontrados ${events.length} eventos ativos no Supabase`);
 
-        // 2. Buscar dados dos tiers na blockchain em paralelo
-        console.log(' -> Buscando preços e supply na blockchain...');
-        const eventsWithBlockchainData = await fetchEventsBlockchainData(events);
+        // 2. Processar eventos em paralelo (versão simplificada)
+        console.log(' -> Buscando dados da blockchain...');
+        
+        const eventsWithBlockchainData = await Promise.all(
+            events.map(async (event) => {
+                try {
+                    const eventAddress = new PublicKey(event.event_address);
+                    const blockchainAccount = await program.account.event.fetch(eventAddress);
+                    
+                    // Processar tiers da blockchain
+                    const processedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
+                        const extractValue = (value) => {
+                            if (!value && value !== 0) return 0;
+                            if (value && typeof value.toNumber === 'function') {
+                                return value.toNumber();
+                            }
+                            return Number(value) || 0;
+                        };
 
-        // 3. Formatar resposta combinando dados
+                        return {
+                            name: tier.name || `Tier ${index + 1}`,
+                            priceBrlCents: extractValue(tier.priceBrlCents),
+                            maxTicketsSupply: extractValue(tier.maxTicketsSupply),
+                            ticketsSold: extractValue(tier.ticketsSold),
+                            ticketsRemaining: extractValue(tier.maxTicketsSupply) - extractValue(tier.ticketsSold),
+                            isSoldOut: extractValue(tier.ticketsSold) >= extractValue(tier.maxTicketsSupply)
+                        };
+                    });
+
+                    const totalTicketsSold = processedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+                    const maxTotalSupply = processedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+
+                    return {
+                        ...event,
+                        blockchainTiers: processedTiers,
+                        totalTicketsSold,
+                        maxTotalSupply,
+                        ticketsAvailable: maxTotalSupply - totalTicketsSold
+                    };
+
+                } catch (error) {
+                    console.warn(`[⚠️] Fallback para ${event.event_address}:`, error.message);
+                    // Fallback para dados do Supabase
+                    return event;
+                }
+            })
+        );
+
+        // 3. Formatar resposta
         const formattedEvents = eventsWithBlockchainData.map(event => ({
             publicKey: event.event_address,
             account: {
@@ -863,31 +796,23 @@ export const getActiveEventsFast = async (req, res) => {
                 maxTicketsPerWallet: event.max_tickets_per_wallet,
                 royaltyBps: event.royalty_bps,
                 metadataUri: event.metadata_url,
-                // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
-                tiers: event.blockchainTiers || [],
-                // ✅ DADOS DINÂMICOS DA BLOCKCHAIN
+                tiers: event.blockchainTiers || event.tiers || [],
                 totalTicketsSold: event.totalTicketsSold || 0,
                 maxTotalSupply: event.maxTotalSupply || 0
             },
             metadata: event.metadata,
             imageUrl: event.image_url,
-            // ✅ INFORMAÇÕES DE PREÇOS E SUPPLY
             ticketInfo: {
                 totalTicketsSold: event.totalTicketsSold || 0,
                 maxTotalSupply: event.maxTotalSupply || 0,
                 ticketsAvailable: event.ticketsAvailable || 0,
                 startingPrice: event.startingPrice || 0,
-                tiersCount: event.tiersCount || 0
+                tiersCount: (event.blockchainTiers || event.tiers || []).length
             }
         }));
 
         const duration = Date.now() - startTime;
         console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos processados em ${duration}ms`);
-        
-        // Log resumo
-        const totalTickets = formattedEvents.reduce((sum, event) => sum + event.ticketInfo.totalTicketsSold, 0);
-        const totalSupply = formattedEvents.reduce((sum, event) => sum + event.ticketInfo.maxTotalSupply, 0);
-        console.log(`[📊] RESUMO: ${totalTickets}/${totalSupply} ingressos vendidos no total`);
 
         res.status(200).json(formattedEvents);
 

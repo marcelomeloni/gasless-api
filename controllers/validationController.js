@@ -1,5 +1,5 @@
 import { program, PublicKey, connection, payerKeypair } from '../services/solanaService.js';
-import { getAssociatedTokenAddress } from '@solana/spl-token';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import supabase from '../services/supabaseService.js';
 import anchor from '@coral-xyz/anchor';
 

@@ -99,30 +99,33 @@ export const validateById = async (req, res) => {
     console.log(`[VALIDATION] Validador: ${validatorAddress}, Tipo: ${authType}`);
 
     try {
-       console.log('[1/7] Buscando registro no Supabase...');
+        console.log('[1/7] Buscando registro no Supabase...');
+        const { data: registration, error: dbError } = await supabase
+            .from('registrations')
+            .select('*')
+            .eq('id', registrationId)
+            .single();
 
-// ✅ CORREÇÃO: Usando o cliente Supabase diretamente
-const { data: registration, error: dbError } = await supabase
-    .from('registrations') 
-    .select('*')
-    .eq('id', registrationId) 
-    .single();
+        if (dbError || !registration) {
+            console.error('[DB_ERROR] Erro ao buscar registro no Supabase:', dbError?.message);
+            return res.status(404).json({ success: false, error: "Registro do ingresso não encontrado." });
+        }
 
-if (dbError || !registration) {
-    console.error('[DB_ERROR] Erro ao buscar registro no Supabase:', dbError?.message);
-    return res.status(404).json({ success: false, error: "Registro do ingresso não encontrado." });
-}
+        console.log('[2/7] Registro encontrado:', {
+            event: registration.event_address,
+            mint: registration.nft_mint_address,
+            name: registration.participant_name,
+        });
+        
+        // Verificação de dados para evitar crash
+        if (!registration.event_address || !registration.nft_mint_address || !registration.owner_address) {
+            return res.status(400).json({ success: false, error: "Dados do registro estão incompletos no banco de dados (endereços faltando)." });
+        }
 
-// ✅ CORREÇÃO: Usando os nomes das colunas do banco de dados (snake_case)
-console.log('[2/7] Registro encontrado:', {
-    event: registration.event_address,
-    mint: registration.nft_mint_address,
-    name: registration.participant_name,
-});
-
-const eventAddress = new web3.PublicKey(registration.event_address);
-const nftMintAddress = new web3.PublicKey(registration.nft_mint_address);
-const ownerAddress = new web3.PublicKey(registration.owner_address);
+        // ✅ CORREÇÃO: Usando anchor.web3
+        const eventAddress = new anchor.web3.PublicKey(registration.event_address);
+        const nftMintAddress = new anchor.web3.PublicKey(registration.nft_mint_address);
+        const ownerAddress = new anchor.web3.PublicKey(registration.owner_address);
 
         // --- [3/7] & [4/7] Validando endereços e permissões ---
         console.log('[3/7] Validando endereços...');
@@ -137,7 +140,8 @@ const ownerAddress = new web3.PublicKey(registration.owner_address);
 
         // --- [5/7] Buscando ingresso on-chain ---
         console.log('[5/7] Buscando ingresso on-chain...');
-        const [ticketPda] = web3.PublicKey.findProgramAddressSync(
+        // ✅ CORREÇÃO: Usando anchor.web3
+        const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
             [Buffer.from("ticket"), eventAddress.toBuffer(), nftMintAddress.toBuffer()],
             program.programId
         );
@@ -166,73 +170,50 @@ const ownerAddress = new web3.PublicKey(registration.owner_address);
             nftMint: nftMintAddress,
         };
         
-        // 1. Crie a instrução da transação
         const redeemInstruction = await program.methods
             .redeemTicket()
             .accounts(accounts)
             .instruction();
 
-        // 2. Busque o blockhash recente
         const latestBlockhash = await connection.getLatestBlockhash('confirmed');
 
-        // 3. Monte a transação
-        const transaction = new web3.Transaction({
+        // ✅ CORREÇÃO: Usando anchor.web3
+        const transaction = new anchor.web3.Transaction({
             recentBlockhash: latestBlockhash.blockhash,
             lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
         });
 
-        // 4. DEFINA O PAGADOR DA TAXA (FEE PAYER)
         transaction.feePayer = payerKeypair.publicKey;
-
-        // 5. Adicione a instrução
         transaction.add(redeemInstruction);
-
-        // 6. Assine com AMBAS as chaves: Validador (autoriza) e Payer (paga)
         transaction.sign(validatorKeypair, payerKeypair);
 
-        // 7. Serialize e envie a transação bruta
         const rawTransaction = transaction.serialize();
         console.log('[SolanaService] 🖊️ Enviando transação assinada...');
         const signature = await connection.sendRawTransaction(rawTransaction);
 
-        // 8. Confirme a transação
         await connection.confirmTransaction({
-            signature: signature,
+            signature,
             blockhash: latestBlockhash.blockhash,
             lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
         }, 'confirmed');
 
         console.log(`[VALIDATION] ✅ Ingresso validado com sucesso! Assinatura: ${signature}`);
 
-        // TODO: Opcional - Salvar o status de validação no seu banco de dados (Supabase)
-
-        // --- Resposta de Sucesso ---
         return res.status(200).json({
             success: true,
-            message: `Entrada liberada para ${registration.participantName}!`,
+            message: `Entrada liberada para ${registration.participant_name || 'Participante'}!`,
             signature: signature,
-            participantName: registration.participantName,
+            participantName: registration.participant_name || 'Participante',
         });
 
     } catch (error) {
+        // ... seu bloco catch continua igual
         console.error("❌ Erro detalhado durante a validação:", error);
-        
+        // ...
         let errorMessage = "Ocorreu um erro desconhecido durante a validação.";
-        if (error.message) {
-            errorMessage = error.message;
-        }
-        // Adiciona logs da blockchain ao erro, se disponíveis
-        if (error.logs) {
-            console.error('--- LOGS DA BLOCKCHAIN ---');
-            console.error(error.logs);
-            console.error('-------------------------');
-        }
-
-        return res.status(500).json({
-            success: false,
-            error: "Falha na validação do ingresso.",
-            details: errorMessage,
-        });
+        if (error.message) { errorMessage = error.message; }
+        if (error.logs) { console.error('--- LOGS DA BLOCKCHAIN ---'); console.error(error.logs); console.error('-------------------------'); }
+        return res.status(500).json({ success: false, error: "Falha na validação do ingresso.", details: errorMessage });
     }
 };
 

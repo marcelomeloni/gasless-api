@@ -6,7 +6,120 @@ import { getKeypairFromPrivateKey, getKeypairFromSeedPhrase, getKeypairFromCrede
 
 // Cache de keypairs para validadores
 const validatorKeypairs = new Map();
+/**
+ * Busca informações do ingresso sem validar (para preview)
+ */
+export const getTicketInfo = async (req, res) => {
+  const { registrationId } = req.params;
 
+  console.log(`[TICKET-INFO] Buscando informações para: ${registrationId}`);
+
+  try {
+    // ETAPAS 1 & 2: Buscar dados do registro e perfil no Supabase
+    console.log('[1/4] Buscando registro na tabela `registrations`...');
+    const { data: registration, error: regError } = await supabase
+      .from('registrations')
+      .select('*')
+      .eq('id', registrationId)
+      .single();
+
+    if (regError || !registration) {
+      throw new Error(`Registro do ingresso não encontrado: ${regError?.message || 'não existe'}`);
+    }
+
+    console.log(`[2/4] Buscando perfil na tabela \`profiles\` (ID: ${registration.profile_id})...`);
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('wallet_address, name')
+      .eq('id', registration.profile_id)
+      .single();
+
+    if (profileError || !profile) {
+      throw new Error(`Perfil do dono do ingresso não encontrado: ${profileError?.message || 'não existe'}`);
+    }
+
+    // ETAPA 3: Buscar dados do evento
+    console.log('[3/4] Buscando dados do evento...');
+    const eventAddress = new anchor.web3.PublicKey(registration.event_address);
+    const eventAccount = await program.account.event.fetch(eventAddress);
+    
+    // Buscar metadados do evento se disponível
+    let eventMetadata = {};
+    try {
+      // Supondo que você tenha os metadados do evento em outra tabela
+      const { data: eventData } = await supabase
+        .from('events')
+        .select('name, metadata')
+        .eq('address', registration.event_address)
+        .single();
+      
+      if (eventData) {
+        eventMetadata = eventData.metadata || {};
+      }
+    } catch (error) {
+      console.log('[TICKET-INFO] Metadados do evento não encontrados, usando dados básicos');
+    }
+
+    // ETAPA 4: Verificar status on-chain do ingresso
+    console.log('[4/4] Verificando status do ingresso on-chain...');
+    const mintAddress = new anchor.web3.PublicKey(registration.mint_address);
+    const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
+      program.programId
+    );
+
+    let isRedeemed = false;
+    try {
+      const ticketAccount = await program.account.ticket.fetch(ticketPda);
+      isRedeemed = ticketAccount.redeemed;
+      console.log(`[TICKET-INFO] Status do ingresso: ${isRedeemed ? 'VALIDADO' : 'NÃO VALIDADO'}`);
+    } catch (error) {
+      console.warn('[TICKET-INFO] Não foi possível verificar status on-chain, assumindo não validado');
+      isRedeemed = false;
+    }
+
+    // Consolidar dados para resposta
+    const ticketInfo = {
+      registrationId,
+      participantName: registration.registration_details?.name || profile.name || 'Participante',
+      ownerAddress: profile.wallet_address,
+      ownerName: profile.name,
+      eventName: eventMetadata.name || `Evento ${registration.event_address.slice(0, 8)}...`,
+      eventAddress: registration.event_address,
+      mintAddress: registration.mint_address,
+      isRedeemed,
+      registrationDetails: registration.registration_details,
+      eventDetails: {
+        totalTickets: eventAccount.totalTickets.toString(),
+        ticketsSold: eventAccount.ticketsSold.toString(),
+        validators: eventAccount.validators.map(v => v.toString())
+      }
+    };
+
+    console.log(`[TICKET-INFO] ✅ Informações encontradas para: ${ticketInfo.participantName}`);
+    
+    return res.status(200).json({
+      success: true,
+      ...ticketInfo
+    });
+
+  } catch (error) {
+    console.error("❌ Erro ao buscar informações do ingresso:", error);
+    
+    let statusCode = 500;
+    let errorMessage = error.message || "Ocorreu um erro ao buscar informações do ingresso.";
+    
+    if (error.message.includes("não encontrado")) {
+      statusCode = 404;
+    }
+
+    return res.status(statusCode).json({ 
+      success: false, 
+      error: "Falha ao buscar informações do ingresso.", 
+      details: errorMessage 
+    });
+  }
+};
 /**
  * Obtém o keypair do validador baseado no tipo de autenticação
  */

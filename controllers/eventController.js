@@ -7,7 +7,63 @@ import axios from 'axios';
 import { Transaction } from '@solana/web3.js';
 import FormData from 'form-data';
 import { deriveUserKeypair } from '../services/walletDerivationService.js';
+// Adicione esta rota no seu eventController.js
+export const getEventFromSupabase = async (req, res) => {
+    const { eventAddress } = req.params;
+    
+    if (!eventAddress) {
+        return res.status(400).json({ success: false, error: 'Endereço do evento é obrigatório.' });
+    }
 
+    console.log(`[⚡] Buscando evento no Supabase: ${eventAddress}`);
+    
+    try {
+        const { data: event, error } = await supabase
+            .from('events')
+            .select('*')
+            .eq('event_address', eventAddress)
+            .single();
+
+        if (error || !event) {
+            console.log(` ❌ Evento não encontrado no Supabase: ${eventAddress}`);
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Evento não encontrado no banco de dados.' 
+            });
+        }
+
+        console.log(` ✅ Evento encontrado no Supabase: ${event.metadata?.name || 'Sem nome'}`);
+        
+        // Formatar resposta similar à API rápida
+        const formattedEvent = {
+            publicKey: eventAddress,
+            account: {
+                eventId: event.event_id,
+                controller: event.controller,
+                salesStartDate: { toNumber: () => event.sales_start_date },
+                salesEndDate: { toNumber: () => event.sales_end_date },
+                maxTicketsPerWallet: event.max_tickets_per_wallet,
+                royaltyBps: event.royalty_bps,
+                metadataUri: event.metadata_url,
+                tiers: event.tiers || []
+            },
+            metadata: event.metadata || {},
+            imageUrl: event.image_url
+        };
+
+        res.status(200).json({
+            success: true,
+            event: formattedEvent
+        });
+
+    } catch (error) {
+        console.error("[❌] Erro ao buscar evento do Supabase:", error);
+        res.status(500).json({
+            success: false,
+            error: 'Erro interno ao buscar evento.'
+        });
+    }
+};
 export const getNextFourEvents = async (req, res) => {
     console.log('[⚡] API ULTRA-RÁPIDA: Buscando 4 próximos eventos ATIVOS do Supabase...');
     const startTime = Date.now();

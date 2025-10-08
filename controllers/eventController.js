@@ -731,193 +731,394 @@ export const getActiveEventsFast = async (req, res) => {
     }
 };
 
-export const getEventDetailsFast = async (req, res) => {
-    const { eventAddress } = req.params;
+const axios = require('axios');
+
+// Lista de gateways IPFS em ordem de prioridade
+const IPFS_GATEWAYS = [
+  'https://cloudflare-ipfs.com/ipfs/',
+  'https://ipfs.io/ipfs/',
+  'https://gateway.pinata.cloud/ipfs/',
+  'https://dweb.link/ipfs/',
+  'https://cf-ipfs.com/ipfs/'
+];
+
+// Timeout para as requisições (em milissegundos)
+const GATEWAY_TIMEOUT = 5000;
+
+/**
+ * Extrai o CID de uma URL IPFS
+ */
+function extractCID(ipfsUrl) {
+  if (!ipfsUrl) return null;
+  
+  // Padrões comuns de URLs IPFS
+  const patterns = [
+    /\/ipfs\/([a-zA-Z0-9]+)/, // URL com gateway: https://gateway.pinata.cloud/ipfs/Qm...
+    /^(Qm[1-9A-HJ-NP-Za-km-z]{44})/, // CID direto: Qm...
+    /^bafybei[a-zA-Z0-9]+/, // CID v1: bafybei...
+  ];
+
+  for (const pattern of patterns) {
+    const match = ipfsUrl.match(pattern);
+    if (match) {
+      return match[1] || match[0];
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Verifica se uma URL é acessível
+ */
+async function checkUrlAccessibility(url) {
+  try {
+    const response = await axios.head(url, {
+      timeout: GATEWAY_TIMEOUT,
+      validateStatus: (status) => status === 200
+    });
     
-    if (!eventAddress) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'O endereço do evento é obrigatório.' 
-      });
+    return response.status === 200;
+  } catch (error) {
+    // Ignora erros 429 (Too Many Requests) e outros
+    return false;
+  }
+}
+
+/**
+ * Tenta acessar uma imagem IPFS através de múltiplos gateways
+ */
+async function getAccessibleIpfsUrl(ipfsUrl) {
+  if (!ipfsUrl) return ipfsUrl;
+
+  // Se não é uma URL IPFS, retorna original
+  const cid = extractCID(ipfsUrl);
+  if (!cid) return ipfsUrl;
+
+  // Tenta a URL original primeiro (pode ser um gateway que funciona)
+  try {
+    if (await checkUrlAccessibility(ipfsUrl)) {
+      console.log(` ✅ Gateway original funcionando: ${ipfsUrl}`);
+      return ipfsUrl;
     }
-  
-    console.log(`[🔍] BUSCA DIRETA NA BLOCKCHAIN: ${eventAddress}`);
-    const startTime = Date.now();
-  
+  } catch (error) {
+    // Continua para outros gateways
+  }
+
+  // Testa gateways alternativos
+  for (const gateway of IPFS_GATEWAYS) {
+    const gatewayUrl = `${gateway}${cid}`;
+    
+    // Pula o gateway se for o mesmo da URL original
+    if (gatewayUrl === ipfsUrl) continue;
+    
     try {
-      const eventPubkey = new PublicKey(eventAddress);
+      console.log(` 🔄 Tentando gateway: ${gateway}`);
       
-      // ✅ BUSCA DIRETA NA BLOCKCHAIN - SEM CACHE
-      console.log(' -> Buscando dados diretamente da blockchain...');
-      let blockchainAccount;
-      try {
-        blockchainAccount = await program.account.event.fetch(eventPubkey);
-        console.log(' ✅ Dados brutos da blockchain recebidos');
-        
-        // ✅ DEBUG: Log da estrutura completa
-        console.log('🔍 ESTRUTURA DO EVENTO NA BLOCKCHAIN:');
-        console.log('- eventId:', blockchainAccount.eventId?.toString());
-        console.log('- controller:', blockchainAccount.controller?.toString());
-        console.log('- totalTicketsSold:', blockchainAccount.totalTicketsSold?.toString());
-        console.log('- tiers count:', blockchainAccount.tiers?.length || 0);
-        
-        if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
-          blockchainAccount.tiers.forEach((tier, index) => {
-            console.log(`🎫 Tier ${index}:`);
-            console.log('   - name:', tier.name);
-            console.log('   - priceBrlCents:', tier.priceBrlCents?.toString());
-            console.log('   - maxTicketsSupply:', tier.maxTicketsSupply?.toString());
-            console.log('   - ticketsSold:', tier.ticketsSold?.toString());
-          });
-        }
-      } catch (error) {
-        console.error(' ❌ Erro ao buscar evento na blockchain:', error);
-        return res.status(404).json({
-          success: false,
-          error: "Evento não encontrado na blockchain."
-        });
+      if (await checkUrlAccessibility(gatewayUrl)) {
+        console.log(` ✅ Gateway funcionando: ${gateway}`);
+        return gatewayUrl;
       }
-  
-      // ✅ Buscar metadados do Supabase apenas para display
-      let finalMetadata = {};
-      let finalImageUrl = '';
-  
-      try {
-        const supabaseEvent = await getEventFromSupabase(eventAddress);
-        finalMetadata = supabaseEvent.metadata || {};
-        finalImageUrl = supabaseEvent.image_url || '';
-        console.log(' ✅ Metadados do Supabase carregados (apenas para display)');
-      } catch (error) {
-        console.warn(' ⚠️  Supabase não disponível, usando metadados fallback');
-        finalMetadata = {
-          name: "Evento Sem Nome",
-          description: "Descrição não disponível",
-          properties: {}
-        };
-      }
-  
-      // ✅ CORREÇÃO CRÍTICA: Processar tiers DIRETAMENTE da blockchain
-      const formattedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
-        // ✅ EXTRAÇÃO DIRETA DOS VALORES - SEM ASSUNÇÕES
-        let priceBrlCents = 0;
-        let maxTicketsSupply = 0;
-        let ticketsSold = 0;
-  
-        // Tentar diferentes formas de extrair os valores
-        try {
-          // Método 1: Se for BN object
-          if (tier.priceBrlCents && typeof tier.priceBrlCents.toNumber === 'function') {
-            priceBrlCents = tier.priceBrlCents.toNumber();
-          } else if (tier.priceBrlCents !== undefined && tier.priceBrlCents !== null) {
-            // Método 2: Se já for número
-            priceBrlCents = Number(tier.priceBrlCents);
-          }
-  
-          if (tier.maxTicketsSupply && typeof tier.maxTicketsSupply.toNumber === 'function') {
-            maxTicketsSupply = tier.maxTicketsSupply.toNumber();
-          } else if (tier.maxTicketsSupply !== undefined && tier.maxTicketsSupply !== null) {
-            maxTicketsSupply = Number(tier.maxTicketsSupply);
-          }
-  
-          if (tier.ticketsSold && typeof tier.ticketsSold.toNumber === 'function') {
-            ticketsSold = tier.ticketsSold.toNumber();
-          } else if (tier.ticketsSold !== undefined && tier.ticketsSold !== null) {
-            ticketsSold = Number(tier.ticketsSold);
-          }
-        } catch (error) {
-          console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
-        }
-  
-        const ticketsRemaining = maxTicketsSupply - ticketsSold;
-        
-        console.log(`🎫 Tier ${index} processado:`, {
-          name: tier.name,
-          priceBrlCents,
-          maxTicketsSupply,
-          ticketsSold,
-          ticketsRemaining
-        });
-  
-        return {
-          name: tier.name || `Tier ${index + 1}`,
-          priceBrlCents: priceBrlCents,
-          maxTicketsSupply: maxTicketsSupply,
-          ticketsSold: ticketsSold,
-          ticketsRemaining: ticketsRemaining,
-          isSoldOut: ticketsSold >= maxTicketsSupply
-        };
-      });
-  
-      // ✅ Calcular totais baseados nos tiers processados
-      const totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
-      const maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
-  
-      // ✅ ESTRUTURA FINAL DO EVENTO
-      const eventData = {
-        publicKey: eventAddress,
-        account: {
-          // Dados básicos do evento
-          eventId: blockchainAccount.eventId,
-          controller: blockchainAccount.controller.toString(),
-          salesStartDate: blockchainAccount.salesStartDate,
-          salesEndDate: blockchainAccount.salesEndDate,
-          maxTicketsPerWallet: blockchainAccount.maxTicketsPerWallet?.toNumber?.() || 1,
-          royaltyBps: blockchainAccount.royaltyBps?.toNumber?.() || 0,
-          metadataUri: blockchainAccount.metadataUri,
-          
-          // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
-          tiers: formattedTiers,
-          
-          // Dados dinâmicos
-          totalTicketsSold: totalTicketsSold,
-          maxTotalSupply: maxTotalSupply,
-          revenue: blockchainAccount.revenue?.toNumber?.() || 0,
-          isActive: blockchainAccount.isActive,
-          canceled: blockchainAccount.canceled,
-          validators: (blockchainAccount.validators || []).map(v => v.toString()),
-          state: blockchainAccount.state
-        },
-        metadata: finalMetadata,
-        imageUrl: finalImageUrl,
-      };
-  
-      const duration = Date.now() - startTime;
-      console.log(`[✅] DETALHES CARREGADOS EM ${duration}ms`);
-      console.log(` -> Tiers processados: ${formattedTiers.length}`);
-      console.log(` -> Ingressos totais: ${totalTicketsSold}/${maxTotalSupply} vendidos`);
-      
-      // ✅ LOG FINAL PARA CONFIRMAÇÃO
-      formattedTiers.forEach((tier, index) => {
-        console.log(`   Tier "${tier.name}": ${tier.ticketsSold}/${tier.maxTicketsSupply} vendidos`);
-      });
-  
-      res.status(200).json({
-        success: true,
-        event: eventData,
-        dataSources: {
-          blockchain: true,
-          tiersSource: 'blockchain-diret',
-          metadataSource: 'supabase'
-        }
-      });
-  
     } catch (error) {
-      console.error("[❌] Erro crítico ao buscar detalhes do evento:", error);
+      // Continua para o próximo gateway
+      console.log(` ❌ Gateway falhou: ${gateway}`);
+    }
+  }
+
+  // Se nenhum gateway funcionou, retorna a URL original
+  console.log(` ⚠️  Todos os gateways falharam para CID: ${cid}`);
+  return ipfsUrl;
+}
+
+/**
+ * Processa recursivamente um objeto para substituir URLs IPFS
+ */
+async function processIpfsUrlsInObject(obj, processedUrls = new Map()) {
+  if (!obj || typeof obj !== 'object') return obj;
+
+  const result = Array.isArray(obj) ? [] : {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === 'string' && 
+        (value.includes('ipfs') || value.includes('Qm') || value.includes('bafybei'))) {
+      
+      // Verifica se já processamos esta URL
+      if (processedUrls.has(value)) {
+        result[key] = processedUrls.get(value);
+      } else {
+        const processedUrl = await getAccessibleIpfsUrl(value);
+        result[key] = processedUrl;
+        processedUrls.set(value, processedUrl);
+      }
+    } else if (typeof value === 'object' && value !== null) {
+      result[key] = await processIpfsUrlsInObject(value, processedUrls);
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Função principal: Substitui URLs IPFS por URLs acessíveis
+ */
+async function getImagesWithFallback(supabaseEvent) {
+  console.log(' 🖼️  Processando URLs IPFS com fallback...');
   
-      if (error.message.includes('Invalid public key')) {
-        return res.status(400).json({
-          success: false,
-          error: 'O endereço do evento fornecido é inválido.'
+  if (!supabaseEvent) {
+    return {
+      eventImageUrl: '',
+      organizerLogoUrl: ''
+    };
+  }
+
+  try {
+    // Cria uma cópia profunda para não modificar o original
+    const processedEvent = JSON.parse(JSON.stringify(supabaseEvent));
+    
+    // Processa image_url direto
+    if (processedEvent.image_url) {
+      processedEvent.image_url = await getAccessibleIpfsUrl(processedEvent.image_url);
+    }
+
+    // Processa metadados recursivamente
+    if (processedEvent.metadata) {
+      processedEvent.metadata = await processIpfsUrlsInObject(processedEvent.metadata);
+    }
+
+    // Extrai as URLs finais
+    const eventImageUrl = processedEvent.image_url || 
+                         (processedEvent.metadata?.image || '');
+    
+    const organizerLogoUrl = processedEvent.metadata?.organizer?.organizerLogo || '';
+
+    console.log(' ✅ URLs IPFS processadas com sucesso');
+    console.log(`   - Event Image: ${eventImageUrl}`);
+    console.log(`   - Organizer Logo: ${organizerLogoUrl}`);
+
+    return {
+      eventImageUrl,
+      organizerLogoUrl,
+      processedEvent // Opcional: retorna o evento completo processado
+    };
+
+  } catch (error) {
+    console.error(' ❌ Erro ao processar URLs IPFS:', error);
+    
+    // Fallback: retorna URLs originais em caso de erro
+    return {
+      eventImageUrl: supabaseEvent.image_url || 
+                    (supabaseEvent.metadata?.image || ''),
+      organizerLogoUrl: supabaseEvent.metadata?.organizer?.organizerLogo || ''
+    };
+  }
+}
+
+// ✅ INTEGRAÇÃO NA SUA ROTA EXISTENTE
+export const getEventDetailsFast = async (req, res) => {
+  const { eventAddress } = req.params;
+  
+  if (!eventAddress) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'O endereço do evento é obrigatório.' 
+    });
+  }
+
+  console.log(`[🔍] BUSCA DIRETA NA BLOCKCHAIN: ${eventAddress}`);
+  const startTime = Date.now();
+
+  try {
+    const eventPubkey = new PublicKey(eventAddress);
+    
+    // ✅ BUSCA DIRETA NA BLOCKCHAIN - SEM CACHE
+    console.log(' -> Buscando dados diretamente da blockchain...');
+    let blockchainAccount;
+    try {
+      blockchainAccount = await program.account.event.fetch(eventPubkey);
+      console.log(' ✅ Dados brutos da blockchain recebidos');
+      
+      // ✅ DEBUG: Log da estrutura completa
+      console.log('🔍 ESTRUTURA DO EVENTO NA BLOCKCHAIN:');
+      console.log('- eventId:', blockchainAccount.eventId?.toString());
+      console.log('- controller:', blockchainAccount.controller?.toString());
+      console.log('- totalTicketsSold:', blockchainAccount.totalTicketsSold?.toString());
+      console.log('- tiers count:', blockchainAccount.tiers?.length || 0);
+      
+      if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
+        blockchainAccount.tiers.forEach((tier, index) => {
+          console.log(`🎫 Tier ${index}:`);
+          console.log('   - name:', tier.name);
+          console.log('   - priceBrlCents:', tier.priceBrlCents?.toString());
+          console.log('   - maxTicketsSupply:', tier.maxTicketsSupply?.toString());
+          console.log('   - ticketsSold:', tier.ticketsSold?.toString());
         });
       }
-  
-      res.status(500).json({
+    } catch (error) {
+      console.error(' ❌ Erro ao buscar evento na blockchain:', error);
+      return res.status(404).json({
         success: false,
-        error: 'Ocorreu um erro no servidor ao buscar os dados do evento.',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        error: "Evento não encontrado na blockchain."
       });
     }
-  };
+
+    // ✅ Buscar metadados do Supabase apenas para display
+    let finalMetadata = {};
+    let finalImageUrl = '';
+    let finalOrganizerLogo = '';
+
+    try {
+      const supabaseEvent = await getEventFromSupabase(eventAddress);
+      
+      // ✅ NOVO: PROCESSAMENTO DE IMAGENS COM FALLBACK
+      const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback(supabaseEvent);
+      
+      finalMetadata = supabaseEvent.metadata || {};
+      finalImageUrl = eventImageUrl;
+      finalOrganizerLogo = organizerLogoUrl;
+      
+      console.log(' ✅ Metadados do Supabase carregados com fallback IPFS');
+    } catch (error) {
+      console.warn(' ⚠️  Supabase não disponível, usando metadados fallback');
+      finalMetadata = {
+        name: "Evento Sem Nome",
+        description: "Descrição não disponível",
+        properties: {}
+      };
+    }
+
+    // ✅ CORREÇÃO CRÍTICA: Processar tiers DIRETAMENTE da blockchain
+    const formattedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
+      // ✅ EXTRAÇÃO DIRETA DOS VALORES - SEM ASSUNÇÕES
+      let priceBrlCents = 0;
+      let maxTicketsSupply = 0;
+      let ticketsSold = 0;
+
+      // Tentar diferentes formas de extrair os valores
+      try {
+        // Método 1: Se for BN object
+        if (tier.priceBrlCents && typeof tier.priceBrlCents.toNumber === 'function') {
+          priceBrlCents = tier.priceBrlCents.toNumber();
+        } else if (tier.priceBrlCents !== undefined && tier.priceBrlCents !== null) {
+          // Método 2: Se já for número
+          priceBrlCents = Number(tier.priceBrlCents);
+        }
+
+        if (tier.maxTicketsSupply && typeof tier.maxTicketsSupply.toNumber === 'function') {
+          maxTicketsSupply = tier.maxTicketsSupply.toNumber();
+        } else if (tier.maxTicketsSupply !== undefined && tier.maxTicketsSupply !== null) {
+          maxTicketsSupply = Number(tier.maxTicketsSupply);
+        }
+
+        if (tier.ticketsSold && typeof tier.ticketsSold.toNumber === 'function') {
+          ticketsSold = tier.ticketsSold.toNumber();
+        } else if (tier.ticketsSold !== undefined && tier.ticketsSold !== null) {
+          ticketsSold = Number(tier.ticketsSold);
+        }
+      } catch (error) {
+        console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
+      }
+
+      const ticketsRemaining = maxTicketsSupply - ticketsSold;
+      
+      console.log(`🎫 Tier ${index} processado:`, {
+        name: tier.name,
+        priceBrlCents,
+        maxTicketsSupply,
+        ticketsSold,
+        ticketsRemaining
+      });
+
+      return {
+        name: tier.name || `Tier ${index + 1}`,
+        priceBrlCents: priceBrlCents,
+        maxTicketsSupply: maxTicketsSupply,
+        ticketsSold: ticketsSold,
+        ticketsRemaining: ticketsRemaining,
+        isSoldOut: ticketsSold >= maxTicketsSupply
+      };
+    });
+
+    // ✅ Calcular totais baseados nos tiers processados
+    const totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+    const maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+
+    // ✅ ESTRUTURA FINAL DO EVENTO
+    const eventData = {
+      publicKey: eventAddress,
+      account: {
+        // Dados básicos do evento
+        eventId: blockchainAccount.eventId,
+        controller: blockchainAccount.controller.toString(),
+        salesStartDate: blockchainAccount.salesStartDate,
+        salesEndDate: blockchainAccount.salesEndDate,
+        maxTicketsPerWallet: blockchainAccount.maxTicketsPerWallet?.toNumber?.() || 1,
+        royaltyBps: blockchainAccount.royaltyBps?.toNumber?.() || 0,
+        metadataUri: blockchainAccount.metadataUri,
+        
+        // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
+        tiers: formattedTiers,
+        
+        // Dados dinâmicos
+        totalTicketsSold: totalTicketsSold,
+        maxTotalSupply: maxTotalSupply,
+        revenue: blockchainAccount.revenue?.toNumber?.() || 0,
+        isActive: blockchainAccount.isActive,
+        canceled: blockchainAccount.canceled,
+        validators: (blockchainAccount.validators || []).map(v => v.toString()),
+        state: blockchainAccount.state
+      },
+      metadata: finalMetadata,
+      imageUrl: finalImageUrl,
+      organizerLogo: finalOrganizerLogo, // ✅ NOVO: Logo do organizador processado
+    };
+
+    const duration = Date.now() - startTime;
+    console.log(`[✅] DETALHES CARREGADOS EM ${duration}ms`);
+    console.log(` -> Tiers processados: ${formattedTiers.length}`);
+    console.log(` -> Ingressos totais: ${totalTicketsSold}/${maxTotalSupply} vendidos`);
+    
+    // ✅ LOG FINAL PARA CONFIRMAÇÃO
+    formattedTiers.forEach((tier, index) => {
+      console.log(`   Tier "${tier.name}": ${tier.ticketsSold}/${tier.maxTicketsSupply} vendidos`);
+    });
+
+    res.status(200).json({
+      success: true,
+      event: eventData,
+      dataSources: {
+        blockchain: true,
+        tiersSource: 'blockchain-diret',
+        metadataSource: 'supabase',
+        ipfsFallback: true // ✅ NOVO: Indica que o fallback IPFS foi aplicado
+      }
+    });
+
+  } catch (error) {
+    console.error("[❌] Erro crítico ao buscar detalhes do evento:", error);
+
+    if (error.message.includes('Invalid public key')) {
+      return res.status(400).json({
+        success: false,
+        error: 'O endereço do evento fornecido é inválido.'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Ocorreu um erro no servidor ao buscar os dados do evento.',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+// Exporta as funções para uso em outros lugares
+module.exports = {
+  getImagesWithFallback,
+  getAccessibleIpfsUrl,
+  extractCID
+};
 
 // Busca eventos para gestão - APENAS do Supabase
 export const getEventsForManagementFast = async (req, res) => {

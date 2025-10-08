@@ -424,34 +424,36 @@ export const getTicketData = async (req, res) => {
         let eventMetadata = { name: "Evento" };
         let eventName = "Evento";
         
-        // **CORREÇÃO: Buscar metadata do evento do banco de dados**
+        // **CORREÇÃO: Buscar da coluna `metadata` em vez de `registration_details`**
         try {
             const { data: dbEvent, error: dbError } = await supabase
-                .from('events') // Assumindo que a tabela se chama 'events'
-                .select('registration_details, name') // Buscar registration_details e name
+                .from('events')
+                .select('metadata, name, image_url') // Buscar metadata, name e image_url
                 .eq('event_address', eventPublicKey.toString())
                 .single();
 
             if (!dbError && dbEvent) {
                 console.log(`[+] Found event in database:`, dbEvent);
                 
-                // Se registration_details existe e tem dados, usar como metadata
-                if (dbEvent.registration_details && typeof dbEvent.registration_details === 'object') {
-                    eventMetadata = dbEvent.registration_details;
+                // Se metadata existe e tem dados, usar como metadata
+                if (dbEvent.metadata && typeof dbEvent.metadata === 'object') {
+                    eventMetadata = dbEvent.metadata;
                     
                     // Tentar extrair o nome do evento de várias fontes possíveis
-                    eventName = dbEvent.name || 
-                               dbEvent.registration_details.eventName || 
-                               dbEvent.registration_details.name || 
+                    eventName = dbEvent.metadata.name || 
+                               dbEvent.name || 
                                eventAccountData.name || 
                                "Evento Especial";
+
+                    console.log(`[+] Using event name: ${eventName}`);
                 } else {
-                    // Se não tem registration_details, usar o nome direto da tabela
+                    // Se não tem metadata, usar o nome direto da tabela
                     eventName = dbEvent.name || eventAccountData.name || "Evento Especial";
                     eventMetadata.name = eventName;
                 }
             } else {
                 console.warn(`[!] Event not found in database for address ${eventPublicKey.toString()}`);
+                if (dbError) console.warn(`[!] Database error:`, dbError);
                 
                 // Fallback: tentar buscar do metadataUri da chain
                 if (eventAccountData.metadataUri) {

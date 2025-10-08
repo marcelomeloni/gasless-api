@@ -419,65 +419,60 @@ export const getTicketData = async (req, res) => {
             console.warn(`-> On-chain profile not found for owner ${ownerPublicKey.toString()}`);
         }
 
-        // Buscar dados do evento
-        const eventAccountData = await program.account.event.fetch(eventPublicKey);
-        
+        // ✅ CORREÇÃO: Buscar dados do evento de forma segura
+        let eventAccountData = null;
         let eventMetadata = { name: "Evento" };
         let eventName = "Evento";
         
-        // **CORREÇÃO: Buscar da coluna `metadata` em vez de `registration_details`**
         try {
-            const { data: dbEvent, error: dbError } = await supabase
-                .from('events')
-                .select('metadata, name, image_url') // Buscar metadata, name e image_url
-                .eq('event_address', eventPublicKey.toString())
-                .single();
+            // Primeiro tenta buscar da blockchain
+            eventAccountData = await program.account.event.fetch(eventPublicKey);
+            
+            // Agora tenta buscar do Supabase
+            try {
+                const { data: dbEvent, error: dbError } = await supabase
+                    .from('events')
+                    .select('metadata, name, image_url')
+                    .eq('event_address', eventPublicKey.toString())
+                    .single();
 
-            if (!dbError && dbEvent) {
-                console.log(`[+] Found event in database:`, dbEvent);
-                
-                // Se metadata existe e tem dados, usar como metadata
-                if (dbEvent.metadata && typeof dbEvent.metadata === 'object') {
-                    eventMetadata = dbEvent.metadata;
+                if (!dbError && dbEvent) {
+                    console.log(`[+] Found event in database:`, dbEvent);
                     
-                    // Tentar extrair o nome do evento de várias fontes possíveis
-                    eventName = dbEvent.metadata.name || 
-                               dbEvent.name || 
-                               eventAccountData.name || 
-                               "Evento Especial";
-
-                    console.log(`[+] Using event name: ${eventName}`);
+                    if (dbEvent.metadata && typeof dbEvent.metadata === 'object') {
+                        eventMetadata = dbEvent.metadata;
+                        eventName = dbEvent.metadata.name || dbEvent.name || eventAccountData?.name || "Evento Especial";
+                    } else {
+                        eventName = dbEvent.name || eventAccountData?.name || "Evento Especial";
+                        eventMetadata.name = eventName;
+                    }
                 } else {
-                    // Se não tem metadata, usar o nome direto da tabela
-                    eventName = dbEvent.name || eventAccountData.name || "Evento Especial";
-                    eventMetadata.name = eventName;
-                }
-            } else {
-                console.warn(`[!] Event not found in database for address ${eventPublicKey.toString()}`);
-                if (dbError) console.warn(`[!] Database error:`, dbError);
-                
-                // Fallback: tentar buscar do metadataUri da chain
-                if (eventAccountData.metadataUri) {
-                    try {
-                        const metadataResponse = await fetch(eventAccountData.metadataUri);
-                        if (metadataResponse.ok) {
-                            eventMetadata = await metadataResponse.json();
-                            eventName = eventMetadata.name || eventAccountData.name || "Evento Especial";
+                    console.warn(`[!] Event not found in database for address ${eventPublicKey.toString()}`);
+                    
+                    // Fallback: tentar buscar do metadataUri da chain
+                    if (eventAccountData?.metadataUri) {
+                        try {
+                            const metadataResponse = await fetch(eventAccountData.metadataUri);
+                            if (metadataResponse.ok) {
+                                eventMetadata = await metadataResponse.json();
+                                eventName = eventMetadata.name || eventAccountData?.name || "Evento Especial";
+                            }
+                        } catch (fetchError) {
+                            console.warn(`[!] Failed to fetch from metadataUri:`, fetchError.message);
                         }
-                    } catch (fetchError) {
-                        console.warn(`[!] Failed to fetch from metadataUri:`, fetchError.message);
+                    }
+                    
+                    // Último fallback
+                    if (eventAccountData?.name) {
+                        eventName = eventAccountData.name;
+                        eventMetadata.name = eventName;
                     }
                 }
-                
-                // Último fallback: usar nome da conta da chain
-                if (eventAccountData.name) {
-                    eventName = eventAccountData.name;
-                    eventMetadata.name = eventName;
-                }
+            } catch (dbError) {
+                console.warn(`[!] Error querying database for event:`, dbError.message);
             }
-        } catch (dbError) {
-            console.warn(`[!] Error querying database for event:`, dbError.message);
-            // Fallbacks similares ao acima...
+        } catch (error) {
+            console.warn(`[!] Failed to fetch event from blockchain:`, error.message);
         }
 
         res.status(200).json({
@@ -489,10 +484,10 @@ export const getTicketData = async (req, res) => {
             event: { 
                 name: eventName, 
                 metadata: eventMetadata,
-                accountData: {
+                accountData: eventAccountData ? {
                     name: eventAccountData.name,
                     metadataUri: eventAccountData.metadataUri
-                }
+                } : null
             }
         });
     } catch (error) {
@@ -512,7 +507,7 @@ export const getUserTickets = async (req, res) => {
         const ownerPublicKey = new PublicKey(ownerAddress);
         const TICKET_ACCOUNT_OWNER_FIELD_OFFSET = 72;
 
-        // 1. Buscar todas as contas de ingresso para o usuário
+        // ✅ 1. PRIMEIRO: Buscar tickets da blockchain
         const userTicketAccounts = await program.account.ticket.all([
             { memcmp: { offset: TICKET_ACCOUNT_OWNER_FIELD_OFFSET, bytes: ownerPublicKey.toBase58() } }
         ]);
@@ -523,30 +518,75 @@ export const getUserTickets = async (req, res) => {
         }
         console.log(` -> Encontrados ${userTicketAccounts.length} ingressos on-chain.`);
 
-        // 2. Otimização: Agrupar ingressos por evento para buscar metadados em lote
-        const eventPublicKeys = [...new Set(userTicketAccounts.map(t => t.account.event.toString()))]
-            .map(pkStr => new PublicKey(pkStr));
-
-        // 3. Buscar as contas dos eventos correspondentes
-        const eventAccounts = await program.account.event.fetchMultiple(eventPublicKeys);
+        // ✅ 2. AGORA: Buscar dados dos eventos do SUPABASE (muito mais rápido)
+        const eventAddresses = [...new Set(userTicketAccounts.map(t => t.account.event.toString()))];
         
-        // 4. Buscar os metadados de cada evento e criar um mapa para consulta rápida
+        console.log(` -> Buscando dados de ${eventAddresses.length} eventos no Supabase...`);
+        
         const eventDataMap = new Map();
-        await Promise.all(eventAccounts.map(async (account, index) => {
-            if (account) {
-                try {
-                    const response = await fetch(account.metadataUri);
-                    if (response.ok) {
-                        const metadata = await response.json();
-                        eventDataMap.set(eventPublicKeys[index].toString(), { account, metadata });
-                    }
-                } catch (e) {
-                    console.error(` -> Falha ao buscar metadados para o evento ${eventPublicKeys[index].toString()}:`, e.message);
-                }
-            }
-        }));
         
-        // 5. Buscar todas as listagens ativas do marketplace
+        // Buscar eventos do Supabase em paralelo
+        await Promise.all(
+            eventAddresses.map(async (eventAddress) => {
+                try {
+                    const { data: dbEvent, error } = await supabase
+                        .from('events')
+                        .select('*')
+                        .eq('event_address', eventAddress)
+                        .single();
+
+                    if (!error && dbEvent) {
+                        eventDataMap.set(eventAddress, {
+                            account: {
+                                eventId: dbEvent.event_id,
+                                controller: dbEvent.controller,
+                                salesStartDate: { toNumber: () => dbEvent.sales_start_date },
+                                salesEndDate: { toNumber: () => dbEvent.sales_end_date },
+                                maxTicketsPerWallet: dbEvent.max_tickets_per_wallet,
+                                royaltyBps: dbEvent.royalty_bps,
+                                metadataUri: dbEvent.metadata_url,
+                                tiers: dbEvent.tiers || []
+                            },
+                            metadata: dbEvent.metadata || {},
+                            imageUrl: dbEvent.image_url
+                        });
+                        console.log(` ✅ Evento ${eventAddress} carregado do Supabase`);
+                    } else {
+                        console.warn(` ⚠️ Evento ${eventAddress} não encontrado no Supabase`);
+                        
+                        // Fallback: buscar da blockchain
+                        try {
+                            const eventPubkey = new PublicKey(eventAddress);
+                            const blockchainAccount = await program.account.event.fetch(eventPubkey);
+                            
+                            let metadata = {};
+                            if (blockchainAccount.metadataUri) {
+                                try {
+                                    const response = await fetch(blockchainAccount.metadataUri);
+                                    if (response.ok) {
+                                        metadata = await response.json();
+                                    }
+                                } catch (e) {
+                                    console.warn(` ❌ Falha ao buscar metadados IPFS para ${eventAddress}`);
+                                }
+                            }
+                            
+                            eventDataMap.set(eventAddress, {
+                                account: blockchainAccount,
+                                metadata: metadata,
+                                imageUrl: metadata.image || ''
+                            });
+                        } catch (blockchainError) {
+                            console.error(` ❌ Erro ao buscar evento ${eventAddress} da blockchain:`, blockchainError.message);
+                        }
+                    }
+                } catch (error) {
+                    console.error(` ❌ Erro ao processar evento ${eventAddress}:`, error.message);
+                }
+            })
+        );
+
+        // ✅ 3. Buscar listagens do marketplace
         const allListings = await program.account.marketplaceListing.all();
         const listedNftMints = new Set(
             allListings
@@ -554,13 +594,19 @@ export const getUserTickets = async (req, res) => {
                 .map(l => l.account.nftMint.toString())
         );
 
-        // 6. Combinar os dados: ingresso + metadados do evento + status de listagem
+        // ✅ 4. Combinar dados
         const enrichedTickets = userTicketAccounts.map(ticket => {
-            const eventDetails = eventDataMap.get(ticket.account.event.toString());
+            const eventAddress = ticket.account.event.toString();
+            const eventDetails = eventDataMap.get(eventAddress);
+            
             return {
                 publicKey: ticket.publicKey.toString(),
                 account: ticket.account,
-                event: eventDetails || null,
+                event: eventDetails || {
+                    account: {},
+                    metadata: { name: "Evento não encontrado" },
+                    imageUrl: ''
+                },
                 isListed: listedNftMints.has(ticket.account.nftMint.toString()),
             };
         });

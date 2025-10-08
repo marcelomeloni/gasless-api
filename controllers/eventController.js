@@ -729,13 +729,124 @@ export const addValidatorGasless = async (req, res) => {
     }
 };
 export const getActiveEventsFast = async (req, res) => {
-    console.log('[⚡] API RÁPIDA: Buscando eventos ATIVOS (Supabase + Blockchain)...');
+    console.log('[⚡] API RÁPIDA: Buscando eventos ativos (Supabase + Blockchain)...');
     const startTime = Date.now();
 
+    // ✅ MOVA A FUNÇÃO fetchEventsBlockchainData PARA DENTRO AQUI
+    const fetchEventsBlockchainData = async (events) => {
+        const concurrencyLimit = 6;
+        const semaphore = new Semaphore(concurrencyLimit);
+        
+        const promises = events.map(async (event) => {
+            await semaphore.acquire();
+            try {
+                const eventAddress = new PublicKey(event.event_address);
+                
+                // ✅ BUSCA DIRETA NA BLOCKCHAIN
+                const blockchainAccount = await program.account.event.fetch(eventAddress);
+                
+                // ✅ PROCESSAR TIERS DA BLOCKCHAIN
+                const processedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
+                    const extractValue = (value) => {
+                        if (!value && value !== 0) return 0;
+                        
+                        if (value && typeof value === 'object') {
+                            if (typeof value.toNumber === 'function') {
+                                return value.toNumber();
+                            }
+                            if (value.hex && typeof value.hex === 'string') {
+                                return parseInt(value.hex, 16);
+                            }
+                            try {
+                                return Number(value);
+                            } catch (e) {
+                                console.warn(` ❌ Não foi possível converter valor:`, value);
+                                return 0;
+                            }
+                        }
+                        
+                        if (typeof value === 'string' && value.startsWith('0x')) {
+                            return parseInt(value, 16);
+                        }
+                        
+                        if (typeof value === 'string') {
+                            const num = Number(value);
+                            return isNaN(num) ? 0 : num;
+                        }
+                        
+                        return Number(value) || 0;
+                    };
+
+                    const priceBrlCents = extractValue(tier.priceBrlCents);
+                    const maxTicketsSupply = extractValue(tier.maxTicketsSupply);
+                    const ticketsSold = extractValue(tier.ticketsSold);
+                    const ticketsRemaining = maxTicketsSupply - ticketsSold;
+                    
+                    return {
+                        name: tier.name || `Tier ${index + 1}`,
+                        priceBrlCents: priceBrlCents,
+                        maxTicketsSupply: maxTicketsSupply,
+                        ticketsSold: ticketsSold,
+                        ticketsRemaining: ticketsRemaining,
+                        isSoldOut: ticketsSold >= maxTicketsSupply
+                    };
+                });
+
+                // ✅ CALCULAR TOTAIS
+                const totalTicketsSold = processedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+                const maxTotalSupply = processedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+                
+                // ✅ ENCONTRAR PREÇO INICIAL
+                const availableTiers = processedTiers.filter(tier => !tier.isSoldOut && tier.ticketsRemaining > 0);
+                const startingPrice = availableTiers.length > 0 
+                    ? Math.min(...availableTiers.map(tier => tier.priceBrlCents))
+                    : processedTiers.length > 0 
+                        ? Math.min(...processedTiers.map(tier => tier.priceBrlCents))
+                        : 0;
+
+                return {
+                    ...event,
+                    blockchainTiers: processedTiers,
+                    totalTicketsSold,
+                    maxTotalSupply,
+                    ticketsAvailable: maxTotalSupply - totalTicketsSold,
+                    startingPrice,
+                    tiersCount: processedTiers.length
+                };
+                
+            } catch (error) {
+                console.error(`[⚠️] Erro ao buscar dados blockchain para ${event.event_address}:`, error.message);
+                // Fallback: usar dados do Supabase
+                const supabaseTiers = event.tiers || [];
+                const totalTicketsSold = supabaseTiers.reduce((sum, tier) => sum + (tier.ticketsSold || 0), 0);
+                const maxTotalSupply = supabaseTiers.reduce((sum, tier) => sum + (tier.maxTicketsSupply || 0), 0);
+                
+                return {
+                    ...event,
+                    blockchainTiers: supabaseTiers,
+                    totalTicketsSold,
+                    maxTotalSupply,
+                    ticketsAvailable: maxTotalSupply - totalTicketsSold,
+                    startingPrice: supabaseTiers.length > 0 ? Math.min(...supabaseTiers.map(tier => tier.priceBrlCents || 0)) : 0,
+                    tiersCount: supabaseTiers.length,
+                    dataSource: 'supabase-fallback'
+                };
+            } finally {
+                semaphore.release();
+            }
+        });
+
+        const results = await Promise.allSettled(promises);
+        
+        return results
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value);
+    };
+
     try {
-        // 1. Buscar eventos ativos do Supabase (já filtrado por is_active = true)
+        // 1. Buscar eventos ativos do Supabase
         const events = await getActiveEventsFromSupabase();
-        console.log(`[⚡] Encontrados ${events.length} eventos ATIVOS no Supabase`);
+        console.log(`[⚡] Encontrados ${events.length} eventos ativos no Supabase`);
 
         // 2. Buscar dados dos tiers na blockchain em paralelo
         console.log(' -> Buscando preços e supply na blockchain...');
@@ -756,10 +867,7 @@ export const getActiveEventsFast = async (req, res) => {
                 tiers: event.blockchainTiers || [],
                 // ✅ DADOS DINÂMICOS DA BLOCKCHAIN
                 totalTicketsSold: event.totalTicketsSold || 0,
-                maxTotalSupply: event.maxTotalSupply || 0,
-                // ✅ NOVO: Status do evento da blockchain
-                isActive: event.is_active !== undefined ? event.is_active : true,
-                canceled: event.canceled || false
+                maxTotalSupply: event.maxTotalSupply || 0
             },
             metadata: event.metadata,
             imageUrl: event.image_url,
@@ -770,14 +878,11 @@ export const getActiveEventsFast = async (req, res) => {
                 ticketsAvailable: event.ticketsAvailable || 0,
                 startingPrice: event.startingPrice || 0,
                 tiersCount: event.tiersCount || 0
-            },
-            // ✅ NOVO: Status do evento
-            isActive: event.is_active !== undefined ? event.is_active : true,
-            isCanceled: event.canceled || false
+            }
         }));
 
         const duration = Date.now() - startTime;
-        console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos ATIVOS processados em ${duration}ms`);
+        console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos processados em ${duration}ms`);
         
         // Log resumo
         const totalTickets = formattedEvents.reduce((sum, event) => sum + event.ticketInfo.totalTicketsSold, 0);
@@ -787,14 +892,13 @@ export const getActiveEventsFast = async (req, res) => {
         res.status(200).json(formattedEvents);
 
     } catch (error) {
-        console.error("[❌] Erro na API rápida de eventos ativos:", error);
+        console.error("[❌] Erro na API rápida de eventos:", error);
         res.status(500).json({
-            error: "Erro ao buscar eventos ativos",
+            error: "Erro ao buscar eventos",
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
-
 
 
 // Lista de gateways IPFS em ordem de prioridade

@@ -2,7 +2,6 @@ import { program, PublicKey, connection, payerKeypair } from '../services/solana
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import supabase from '../services/supabaseService.js';
 import anchor from '@coral-xyz/anchor';
-
 import { getKeypairFromPrivateKey, getKeypairFromSeedPhrase, getKeypairFromCredentials } from '../lib/authUtils.js';
 
 // Cache de keypairs para validadores (em produção, usar Redis ou database)
@@ -30,12 +29,16 @@ async function getValidatorKeypair(validatorAddress, authType, authData) {
         break;
 
       case 'seedPhrase':
-        if (!authData?.seedWords || !Array.isArray(authData.seedWords)) throw new Error('Seed phrase não fornecida ou formato inválido');
+        if (!authData?.seedWords || !Array.isArray(authData.seedWords)) {
+          throw new Error('Seed phrase não fornecida ou formato inválido');
+        }
         keypair = await getKeypairFromSeedPhrase(authData.seedWords);
         break;
 
       case 'credentials':
-        if (!authData?.username || !authData?.password) throw new Error('Username e password são obrigatórios');
+        if (!authData?.username || !authData?.password) {
+          throw new Error('Username e password são obrigatórios');
+        }
         keypair = await getKeypairFromCredentials(authData.username, authData.password);
         break;
 
@@ -63,157 +66,211 @@ async function getValidatorKeypair(validatorAddress, authType, authData) {
 }
 
 /**
- * Cria e assina uma transação de validação
+ * Busca dados do registro e perfil no Supabase
  */
-async function createAndSignValidationTransaction(program, accounts, validatorKeypair) {
-  try {
-    console.log(`[SolanaService] 🖊️ Criando transação para validador: ${validatorKeypair.publicKey.toString()}`);
+async function fetchRegistrationData(registrationId) {
+  console.log('[1/7] Buscando registro na tabela `registrations`...');
+  const { data: registration, error: regError } = await supabase
+    .from('registrations')
+    .select('*')
+    .eq('id', registrationId)
+    .single();
 
-    const transaction = await program.methods.redeemTicket().accounts(accounts).transaction();
-
-    const { blockhash } = await connection.getRecentBlockhash();
-
-    transaction.feePayer = validatorKeypair.publicKey;
-    transaction.recentBlockhash = blockhash;
-
-    transaction.sign(validatorKeypair);
-
-    console.log(`[SolanaService] ✅ Transação assinada pelo validador`);
-    return transaction;
-  } catch (error) {
-    console.error('[SolanaService] ❌ Erro ao criar transação:', error);
-    throw error;
+  if (regError || !registration) {
+    throw new Error(`Registro do ingresso não encontrado: ${regError?.message || 'não existe'}`);
   }
+
+  console.log(`[2/7] Buscando perfil na tabela \`profiles\` (ID: ${registration.profile_id})...`);
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('wallet_address')
+    .eq('id', registration.profile_id)
+    .single();
+
+  if (profileError || !profile) {
+    throw new Error(`Perfil do dono do ingresso não encontrado: ${profileError?.message || 'não existe'}`);
+  }
+
+  return { registration, profile };
 }
 
+/**
+ * Valida dados críticos do registro
+ */
+function validateRegistrationData(registration, profile) {
+  const { event_address, mint_address, registration_details } = registration;
+  const ownerAddressStr = profile.wallet_address;
+  const participantName = registration_details?.name || 'Participante';
+
+  console.log('[2.5/7] Dados combinados com sucesso:', { 
+    event: event_address, 
+    mint: mint_address, 
+    owner: ownerAddressStr, 
+    name: participantName 
+  });
+
+  if (!event_address || !mint_address || !ownerAddressStr) {
+    throw new Error("Dados críticos (endereços de evento, mint ou dono) estão faltando no banco de dados.");
+  }
+
+  return {
+    eventAddress: new anchor.web3.PublicKey(event_address),
+    mintAddress: new anchor.web3.PublicKey(mint_address),
+    ownerAddress: new anchor.web3.PublicKey(ownerAddressStr),
+    participantName
+  };
+}
+
+/**
+ * Validações on-chain do evento e ingresso
+ */
+async function performOnChainValidations(eventAddress, validatorAddress, mintAddress) {
+  console.log('[3/7] Buscando conta do evento on-chain...');
+  const eventAccount = await program.account.event.fetch(eventAddress);
+
+  console.log('[4/7] Verificando permissões do validador...');
+  const isValidValidator = eventAccount.validators.some(v => v.toString() === validatorAddress);
+  if (!isValidValidator) {
+    throw new Error("Validador não autorizado para este evento.");
+  }
+  console.log(`[VALIDATION] ✅ Validador ${validatorAddress} autorizado.`);
+
+  console.log('[5/7] Buscando conta do ingresso on-chain...');
+  const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
+    program.programId
+  );
+  
+  const ticketAccount = await program.account.ticket.fetch(ticketPda);
+
+  if (ticketAccount.redeemed) {
+    throw new Error("Este ingresso já foi validado.");
+  }
+  console.log(`[VALIDATION] ✅ Ingresso on-chain encontrado. Dono: ${ticketAccount.owner}`);
+
+  return ticketPda;
+}
+
+/**
+ * Cria e envia transação de validação
+ */
+async function createAndSendValidationTransaction(
+  program, 
+  eventAddress, 
+  mintAddress, 
+  ownerAddress, 
+  validatorKeypair,
+  ticketPda
+) {
+  console.log('[7/7] Preparando transação gasless...');
+
+  const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+
+  const transaction = new anchor.web3.Transaction({
+    feePayer: payerKeypair.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+  });
+
+  const nftTokenAddress = getAssociatedTokenAddressSync(mintAddress, ownerAddress);
+  const redeemInstruction = await program.methods.redeemTicket()
+    .accounts({
+      ticket: ticketPda,
+      event: eventAddress,
+      validator: validatorKeypair.publicKey,
+      owner: ownerAddress,
+      nftToken: nftTokenAddress,
+      nftMint: mintAddress,
+    })
+    .instruction();
+
+  transaction.add(redeemInstruction);
+  transaction.sign(validatorKeypair, payerKeypair);
+
+  console.log('[SolanaService] 🖊️ Enviando transação assinada...');
+  const signature = await connection.sendRawTransaction(transaction.serialize());
+
+  await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed');
+  console.log(`[VALIDATION] ✅ Ingresso validado com sucesso! Assinatura: ${signature}`);
+
+  return signature;
+}
 
 /**
  * Valida um ingresso por ID de registro (UUID), usando a carteira central 'Payer'
  * para cobrir os custos da transação (gasless).
  */
 export const validateById = async (req, res) => {
-    const { registrationId } = req.params;
-    const { validatorAddress, authType, authData } = req.body;
+  const { registrationId } = req.params;
+  const { validatorAddress, authType, authData } = req.body;
 
-    console.log(`[VALIDATION] Iniciando validação para: ${registrationId}`);
-    console.log(`[VALIDATION] Validador: ${validatorAddress}, Tipo: ${authType}`);
+  console.log(`[VALIDATION] Iniciando validação para: ${registrationId}`);
+  console.log(`[VALIDATION] Validador: ${validatorAddress}, Tipo: ${authType}`);
 
-    try {
-        // ETAPAS 1 & 2: Buscar dados do ingresso e do dono no Supabase
-        console.log('[1/7] Buscando registro na tabela `registrations`...');
-        const { data: registration, error: regError } = await supabase
-            .from('registrations')
-            .select('*')
-            .eq('id', registrationId)
-            .single();
+  try {
+    // ETAPAS 1 & 2: Buscar dados do ingresso e do dono
+    const { registration, profile } = await fetchRegistrationData(registrationId);
 
-        if (regError || !registration) {
-            throw new Error(`Registro do ingresso não encontrado: ${regError?.message || 'não existe'}`);
-        }
+    // ETAPA 2.5: Consolidar e validar dados
+    const { eventAddress, mintAddress, ownerAddress, participantName } = 
+      validateRegistrationData(registration, profile);
 
-        console.log(`[2/7] Buscando perfil na tabela \`profiles\` (ID: ${registration.profile_id})...`);
-        const { data: profile, error: profileError } = await supabase
-            .from('profiles')
-            .select('wallet_address')
-            .eq('id', registration.profile_id)
-            .single();
+    // ETAPAS 3, 4 & 5: Validações On-Chain
+    const ticketPda = await performOnChainValidations(
+      eventAddress, 
+      validatorAddress, 
+      mintAddress
+    );
 
-        if (profileError || !profile) {
-            throw new Error(`Perfil do dono do ingresso não encontrado: ${profileError?.message || 'não existe'}`);
-        }
+    // ETAPA 6: Autenticação do Validador
+    console.log('[6/7] Obtendo keypair do validador...');
+    const validatorKeypair = await getValidatorKeypair(validatorAddress, authType, authData);
 
-        // ETAPA 2.5: Consolidar e validar dados
-        const { event_address, mint_address, registration_details } = registration;
-        const ownerAddressStr = profile.wallet_address;
-        const participantName = registration_details?.name || 'Participante';
+    // ETAPA 7: Construção e Envio da Transação Gasless
+    const signature = await createAndSendValidationTransaction(
+      program,
+      eventAddress,
+      mintAddress,
+      ownerAddress,
+      validatorKeypair,
+      ticketPda
+    );
 
-        console.log('[2.5/7] Dados combinados com sucesso:', { event: event_address, mint: mint_address, owner: ownerAddressStr, name: participantName });
+    return res.status(200).json({
+      success: true,
+      message: `Entrada liberada para ${participantName}!`,
+      signature,
+      participantName,
+    });
 
-        if (!event_address || !mint_address || !ownerAddressStr) {
-            throw new Error("Dados críticos (endereços de evento, mint ou dono) estão faltando no banco de dados.");
-        }
-
-        const eventAddress = new anchor.web3.PublicKey(event_address);
-        const mintAddress = new anchor.web3.PublicKey(mint_address);
-        const ownerAddress = new anchor.web3.PublicKey(ownerAddressStr);
-        
-        // ETAPAS 3, 4 & 5: Validações On-Chain
-        console.log('[3/7] Buscando conta do evento on-chain...');
-        const eventAccount = await program.account.event.fetch(eventAddress);
-
-        console.log('[4/7] Verificando permissões do validador...');
-        if (!eventAccount.validators.some(v => v.toString() === validatorAddress)) {
-            return res.status(403).json({ success: false, error: "Validador não autorizado para este evento." });
-        }
-        console.log(`[VALIDATION] ✅ Validador ${validatorAddress} autorizado.`);
-
-        console.log('[5/7] Buscando conta do ingresso on-chain...');
-        const [ticketPda] = anchor.web3.PublicKey.findProgramAddressSync(
-            [Buffer.from("ticket"), eventAddress.toBuffer(), mintAddress.toBuffer()],
-            program.programId
-        );
-        const ticketAccount = await program.account.ticket.fetch(ticketPda);
-
-        if (ticketAccount.redeemed) {
-            return res.status(409).json({ success: false, error: "Este ingresso já foi validado." });
-        }
-        console.log(`[VALIDATION] ✅ Ingresso on-chain encontrado. Dono: ${ticketAccount.owner}`);
-
-        // ETAPA 6: Autenticação do Validador
-        console.log('[6/7] Obtendo keypair do validador...');
-        const validatorKeypair = await getValidatorKeypair(validatorAddress, authType, authData);
-
-        // ETAPA 7: Construção e Envio da Transação Gasless
-        console.log('[7/7] Preparando transação gasless...');
-
-        // ✅ CORREÇÃO: Buscamos o blockhash ANTES de criar a transação
-        const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-
-        // ✅ CORREÇÃO: Criamos a transação JÁ com o blockhash
-        const transaction = new anchor.web3.Transaction({
-            feePayer: payerKeypair.publicKey, // Definimos o pagador aqui
-            recentBlockhash: latestBlockhash.blockhash,
-            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-        });
-
-        const nftTokenAddress = getAssociatedTokenAddressSync(mintAddress, ownerAddress);
-        const redeemInstruction = await program.methods.redeemTicket()
-            .accounts({
-                ticket: ticketPda,
-                event: eventAddress,
-                validator: validatorKeypair.publicKey,
-                owner: ownerAddress,
-                nftToken: nftTokenAddress,
-                nftMint: mintAddress,
-            })
-            .instruction();
-
-        transaction.add(redeemInstruction);
-
-        // A transação agora é assinada pelo validador (para autorizar) e pelo payer (para pagar)
-        transaction.sign(validatorKeypair, payerKeypair);
-        
-        console.log('[SolanaService] 🖊️ Enviando transação assinada...');
-        const signature = await connection.sendRawTransaction(transaction.serialize());
-
-        await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed');
-        console.log(`[VALIDATION] ✅ Ingresso validado com sucesso! Assinatura: ${signature}`);
-
-        return res.status(200).json({
-            success: true,
-            message: `Entrada liberada para ${participantName}!`,
-            signature,
-            participantName,
-        });
-
-    } catch (error) {
-        console.error("❌ Erro detalhado durante a validação:", error);
-        let errorMessage = error.message || "Ocorreu um erro desconhecido durante a validação.";
-        if (error.logs) { console.error('--- LOGS DA BLOCKCHAIN ---', error.logs, '-------------------------'); }
-        return res.status(500).json({ success: false, error: "Falha na validação do ingresso.", details: errorMessage });
+  } catch (error) {
+    console.error("❌ Erro detalhado durante a validação:", error);
+    
+    // Mapeamento de erros para status codes apropriados
+    let statusCode = 500;
+    let errorMessage = error.message || "Ocorreu um erro desconhecido durante a validação.";
+    
+    if (error.message.includes("não encontrado")) {
+      statusCode = 404;
+    } else if (error.message.includes("não autorizado")) {
+      statusCode = 403;
+    } else if (error.message.includes("já foi validado")) {
+      statusCode = 409;
+    } else if (error.message.includes("Dados críticos")) {
+      statusCode = 400;
     }
-};
 
+    if (error.logs) {
+      console.error('--- LOGS DA BLOCKCHAIN ---', error.logs, '-------------------------');
+    }
+
+    return res.status(statusCode).json({ 
+      success: false, 
+      error: "Falha na validação do ingresso.", 
+      details: errorMessage 
+    });
+  }
+};
 /**
  * Valida ingresso com transação assinada no frontend (wallet extensions)
  */

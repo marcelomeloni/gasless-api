@@ -59,6 +59,7 @@ export const getActiveEventsFromSupabase = async () => {
     const { data, error } = await supabase
         .from('events')
         .select('*')
+        .eq('is_active', true) // ✅ FILTRO CRÍTICO: apenas eventos ativos
         .gte('sales_end_date', nowInSeconds) // Eventos que ainda não terminaram
         .order('sales_start_date', { ascending: true });
 
@@ -68,11 +69,10 @@ export const getActiveEventsFromSupabase = async () => {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[⚡] ${data?.length || 0} eventos carregados do Supabase em ${duration}ms`);
+    console.log(`[⚡] ${data?.length || 0} eventos ATIVOS carregados do Supabase em ${duration}ms`);
     
     return data || [];
 };
-
 // Busca detalhes de UM evento APENAS do Supabase
 export const getEventFromSupabase = async (eventAddress) => {
     console.log(`[⚡] Buscando evento do Supabase: ${eventAddress}`);

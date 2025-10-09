@@ -1460,44 +1460,19 @@ export const getEventDetailsFast = async (req, res) => {
       };
     }
 
-   onsole.log(' -> Processando imagens com fallback...', {
-  hasImageUrl: !!finalImageUrl,
-  hasMetadataImage: !!finalMetadata.image,
-  hasOrganizerLogo: !!finalOrganizerLogo,
-  metadataOrganizerLogo: !!finalMetadata.organizer?.organizerLogo
-});
-
-try {
-  const imagesResult = await getImagesWithFallback({
-    image_url: finalImageUrl,
-    metadata: finalMetadata
-  });
-  
-  console.log(' ✅ Resultado do getImagesWithFallback:', {
-    eventImageUrl: imagesResult.eventImageUrl,
-    organizerLogoUrl: imagesResult.organizerLogoUrl
-  });
-  
-  finalImageUrl = imagesResult.eventImageUrl;
-  finalOrganizerLogo = imagesResult.organizerLogoUrl;
-  
-  console.log(' ✅ Imagens processadas:', {
-    finalImageUrl: finalImageUrl?.substring(0, 100) + '...',
-    finalOrganizerLogo: finalOrganizerLogo?.substring(0, 100) + '...'
-  });
-} catch (imageError) {
-  console.warn(' ⚠️  Erro ao processar imagens:', imageError.message);
-  
-  // Fallback manual em caso de erro
-  if (!finalImageUrl && finalMetadata.image) {
-    finalImageUrl = finalMetadata.image;
-    console.log(' 🔄 Usando imagem direto do metadata:', finalImageUrl);
-  }
-  if (!finalOrganizerLogo && finalMetadata.organizer?.organizerLogo) {
-    finalOrganizerLogo = finalMetadata.organizer.organizerLogo;
-    console.log(' 🔄 Usando logo direto do metadata:', finalOrganizerLogo);
-  }
-}
+    // ✅ 4. PROCESSAR IMAGENS COM FALLBACK MELHORADO
+    try {
+      const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback({
+        image_url: finalImageUrl,
+        metadata: finalMetadata
+      });
+      
+      finalImageUrl = eventImageUrl;
+      finalOrganizerLogo = organizerLogoUrl;
+      console.log(' ✅ Imagens processadas com fallback');
+    } catch (imageError) {
+      console.warn(' ⚠️  Erro ao processar imagens:', imageError.message);
+    }
 
     // ✅ 5. USAR TIERS DA BLOCKCHAIN (PREFERÊNCIA) OU DO SUPABASE
     let formattedTiers = blockchainTiers;

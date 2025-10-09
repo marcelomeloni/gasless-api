@@ -392,7 +392,7 @@ if (!emailResult.success) {
 export const getTicketData = async (req, res) => {
     const { mintAddress } = req.params;
     if (!mintAddress) return res.status(400).json({ error: "NFT mintAddress is required." });
-    console.log(`[+] Fetching ticket data: ${mintAddress}`);
+    console.log(`[🎫] Buscando dados do ticket: ${mintAddress}`);
 
     try {
         const nftMint = new PublicKey(mintAddress);
@@ -403,12 +403,14 @@ export const getTicketData = async (req, res) => {
         const ownerPublicKey = ticketAccount.account.owner;
         const eventPublicKey = ticketAccount.account.event;
 
+        console.log(`[🔍] Owner: ${ownerPublicKey.toString()}, Event: ${eventPublicKey.toString()}`);
+
         let ownerName = null;
         try {
             const { data: profile } = await supabase.from('profiles').select('name').eq('wallet_address', ownerPublicKey.toString()).single();
             if (profile) ownerName = profile.name;
         } catch (e) { 
-            console.warn(`-> Supabase profile not found for owner ${ownerPublicKey.toString()}`);
+            console.warn(`[⚠️] Perfil não encontrado no Supabase para ${ownerPublicKey.toString()}`);
         }
 
         const [userProfilePda] = PublicKey.findProgramAddressSync([Buffer.from("user_profile"), ownerPublicKey.toBuffer()], program.programId);
@@ -416,64 +418,127 @@ export const getTicketData = async (req, res) => {
         try { 
             userProfile = await program.account.userProfile.fetch(userProfilePda); 
         } catch (e) { 
-            console.warn(`-> On-chain profile not found for owner ${ownerPublicKey.toString()}`);
+            console.warn(`[⚠️] Perfil on-chain não encontrado para ${ownerPublicKey.toString()}`);
         }
 
-        // ✅ CORREÇÃO: Buscar dados do evento de forma segura
+        // ✅✅✅ CORREÇÃO COMPLETA: BUSCAR DADOS COMPLETOS DO EVENTO
         let eventAccountData = null;
-        let eventMetadata = { name: "Evento" };
-        let eventName = "Evento";
-        
-        try {
-            // Primeiro tenta buscar da blockchain
-            eventAccountData = await program.account.event.fetch(eventPublicKey);
-            
-            // Agora tenta buscar do Supabase
-            try {
-                const { data: dbEvent, error: dbError } = await supabase
-                    .from('events')
-                    .select('metadata, name, image_url')
-                    .eq('event_address', eventPublicKey.toString())
-                    .single();
+        let eventMetadata = {};
+        let eventImageUrl = '';
+        let eventName = "Evento Especial";
+        let organizerLogo = '';
+        let complementaryHours = 0;
 
-                if (!dbError && dbEvent) {
-                    console.log(`[+] Found event in database:`, dbEvent);
+        try {
+            // 1. PRIMEIRO: Buscar dados COMPLETOS do Supabase
+            console.log(`[📊] Buscando evento no Supabase: ${eventPublicKey.toString()}`);
+            const { data: dbEvent, error: dbError } = await supabase
+                .from('events')
+                .select('*') // ✅ AGORA BUSCA TODOS OS CAMPOS
+                .eq('event_address', eventPublicKey.toString())
+                .single();
+
+            if (!dbError && dbEvent) {
+                console.log(`[✅] Evento encontrado no Supabase:`, {
+                    name: dbEvent.metadata?.name || dbEvent.event_name,
+                    hasMetadata: !!dbEvent.metadata,
+                    hasImage: !!dbEvent.image_url,
+                    hasOrganizer: !!dbEvent.metadata?.organizer
+                });
+
+                // ✅ EXTRAIR METADADOS COMPLETOS DO SUPABASE
+                eventMetadata = dbEvent.metadata || {};
+                eventImageUrl = dbEvent.image_url || '';
+                
+                // ✅ NOME DO EVENTO COM FALLBACKS
+                eventName = eventMetadata.name || dbEvent.event_name || "Evento Especial";
+                
+                // ✅ LOGO DO ORGANIZADOR
+                organizerLogo = eventMetadata.organizer?.organizerLogo || '';
+                
+                // ✅ HORAS COMPLEMENTARES
+                complementaryHours = eventMetadata.complementaryHours || 
+                                   eventMetadata.additionalInfo?.complementaryHours || 0;
+
+                console.log(`[📝] Metadados extraídos:`, {
+                    eventName,
+                    hasOrganizer: !!eventMetadata.organizer,
+                    complementaryHours,
+                    hasOrganizerLogo: !!organizerLogo
+                });
+
+            } else {
+                console.warn(`[⚠️] Evento não encontrado no Supabase:`, dbError?.message);
+                
+                // 2. FALLBACK: Buscar da blockchain
+                try {
+                    console.log(`[⛓️] Buscando evento na blockchain...`);
+                    eventAccountData = await program.account.event.fetch(eventPublicKey);
                     
-                    if (dbEvent.metadata && typeof dbEvent.metadata === 'object') {
-                        eventMetadata = dbEvent.metadata;
-                        eventName = dbEvent.metadata.name || dbEvent.name || eventAccountData?.name || "Evento Especial";
-                    } else {
-                        eventName = dbEvent.name || eventAccountData?.name || "Evento Especial";
-                        eventMetadata.name = eventName;
-                    }
-                } else {
-                    console.warn(`[!] Event not found in database for address ${eventPublicKey.toString()}`);
-                    
-                    // Fallback: tentar buscar do metadataUri da chain
+                    // 3. FALLBACK: Buscar metadados do IPFS
                     if (eventAccountData?.metadataUri) {
                         try {
+                            console.log(`[🌐] Buscando metadados do IPFS: ${eventAccountData.metadataUri}`);
                             const metadataResponse = await fetch(eventAccountData.metadataUri);
                             if (metadataResponse.ok) {
-                                eventMetadata = await metadataResponse.json();
-                                eventName = eventMetadata.name || eventAccountData?.name || "Evento Especial";
+                                const ipfsMetadata = await metadataResponse.json();
+                                eventMetadata = ipfsMetadata;
+                                eventName = ipfsMetadata.name || eventAccountData?.name || "Evento Especial";
+                                organizerLogo = ipfsMetadata.organizer?.organizerLogo || '';
+                                complementaryHours = ipfsMetadata.complementaryHours || 
+                                                  ipfsMetadata.additionalInfo?.complementaryHours || 0;
+                                console.log(`[✅] Metadados carregados do IPFS: ${eventName}`);
                             }
-                        } catch (fetchError) {
-                            console.warn(`[!] Failed to fetch from metadataUri:`, fetchError.message);
+                        } catch (ipfsError) {
+                            console.warn(`[❌] Erro ao buscar metadados do IPFS:`, ipfsError.message);
                         }
                     }
                     
-                    // Último fallback
+                    // 4. ÚLTIMO FALLBACK: Usar dados básicos da chain
                     if (eventAccountData?.name) {
                         eventName = eventAccountData.name;
                         eventMetadata.name = eventName;
                     }
+                } catch (chainError) {
+                    console.warn(`[❌] Erro ao buscar evento na blockchain:`, chainError.message);
                 }
-            } catch (dbError) {
-                console.warn(`[!] Error querying database for event:`, dbError.message);
             }
         } catch (error) {
-            console.warn(`[!] Failed to fetch event from blockchain:`, error.message);
+            console.error(`[💥] Erro crítico ao buscar dados do evento:`, error);
         }
+
+        // ✅✅✅ ESTRUTURA FINAL COMPLETA DO EVENTO
+        const eventData = {
+            name: eventName,
+            metadata: {
+                ...eventMetadata,
+                // ✅ GARANTIR QUE OS CAMPOS CRÍTICOS EXISTAM
+                organizer: eventMetadata.organizer || {
+                    name: "Organizador",
+                    contactEmail: "",
+                    website: "",
+                    organizerLogo: organizerLogo
+                },
+                additionalInfo: {
+                    ...eventMetadata.additionalInfo,
+                    complementaryHours: complementaryHours
+                }
+            },
+            imageUrl: eventImageUrl,
+            organizerLogo: organizerLogo,
+            complementaryHours: complementaryHours,
+            accountData: eventAccountData ? {
+                name: eventAccountData.name,
+                metadataUri: eventAccountData.metadataUri
+            } : null
+        };
+
+        console.log(`[🎉] Dados finais do evento para certificado:`, {
+            name: eventData.name,
+            hasOrganizerLogo: !!eventData.organizerLogo,
+            complementaryHours: eventData.complementaryHours,
+            hasFullMetadata: !!eventData.metadata.organizer
+        });
 
         res.status(200).json({
             success: true, 
@@ -481,18 +546,14 @@ export const getTicketData = async (req, res) => {
             ownerName: ownerName,
             ticket: ticketAccount.account, 
             profile: userProfile,
-            event: { 
-                name: eventName, 
-                metadata: eventMetadata,
-                accountData: eventAccountData ? {
-                    name: eventAccountData.name,
-                    metadataUri: eventAccountData.metadataUri
-                } : null
-            }
+            event: eventData // ✅ AGORA COM DADOS COMPLETOS
         });
     } catch (error) {
-        console.error("[✘] Error fetching ticket data:", error);
-        res.status(500).json({ error: "Server error fetching data.", details: error.message });
+        console.error("[❌] Erro ao buscar dados do ticket:", error);
+        res.status(500).json({ 
+            error: "Erro no servidor ao buscar dados.", 
+            details: error.message 
+        });
     }
 };
 

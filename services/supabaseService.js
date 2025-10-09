@@ -73,23 +73,7 @@ export const getActiveEventsFromSupabase = async () => {
     
     return data || [];
 };
-// Busca detalhes de UM evento APENAS do Supabase
-export const getEventFromSupabase = async (eventAddress) => {
-    console.log(`[⚡] Buscando evento do Supabase: ${eventAddress}`);
-    
-    const { data, error } = await supabase
-        .from('events')
-        .select('*')
-        .eq('event_address', eventAddress)
-        .single();
 
-    if (error) {
-        console.error(' ❌ Erro ao buscar evento do Supabase:', error);
-        throw error;
-    }
-
-    return data;
-};
 
 // Busca eventos por criador (para página de gestão)
 export const getEventsByCreator = async (creatorAddress) => {

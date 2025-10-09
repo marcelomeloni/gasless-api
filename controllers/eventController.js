@@ -2,7 +2,7 @@ import { program, payerKeypair, SystemProgram, PublicKey, connection } from '../
 import { uploadToPinata, uploadJSONToPinata } from '../services/pinataService.js';
 import anchor from '@coral-xyz/anchor';
 import { createClient } from '@supabase/supabase-js';
-import { saveCompleteEventToSupabase, getActiveEventsFromSupabase, getEventsByCreator, getEventFromSupabase, supabase  } from '../services/supabaseService.js';
+import { saveCompleteEventToSupabase, getActiveEventsFromSupabase, getEventsByCreator, supabase  } from '../services/supabaseService.js';
 import axios from 'axios';
 import { Transaction } from '@solana/web3.js';
 import FormData from 'form-data';
@@ -85,35 +85,81 @@ export const getNextFourEvents = async (req, res) => {
             throw error;
         }
 
-        // ✅ PROCESSAMENTO DE IMAGENS COM FALLBACK IPFS
+        console.log(`[📋] ${data?.length || 0} eventos ativos encontrados no Supabase`);
+
+        // ✅ PROCESSAMENTO DE IMAGENS COM FALLBACK IPFS MELHORADO
         const eventsWithFallbackImages = await Promise.all(
             (data || []).map(async (event) => {
-                let processedImageUrl = event.image_url;
-                
-                // Aplica fallback IPFS se a URL for do Pinata
-                if (event.image_url && event.image_url.includes('pinata')) {
-                    try {
-                        const { getAccessibleIpfsUrl } = require('./ipfsFallback'); // ajuste o caminho
-                        processedImageUrl = await getAccessibleIpfsUrl(event.image_url);
-                        console.log(`   ✅ Imagem processada: ${event.image_url} -> ${processedImageUrl}`);
-                    } catch (ipfsError) {
-                        console.warn(`   ⚠️  Erro no fallback IPFS: ${ipfsError.message}`);
+                try {
+                    let processedImageUrl = event.image_url;
+                    
+                    // Aplica fallback IPFS apenas se a URL for do IPFS/Pinata
+                    if (event.image_url && (event.image_url.includes('ipfs') || event.image_url.includes('pinata'))) {
+                        try {
+                            console.log(` 🖼️  Processando imagem IPFS: ${event.image_url}`);
+                            const cid = extractCID(event.image_url);
+                            
+                            if (cid) {
+                                // Tenta múltiplos gateways em ordem de prioridade
+                                const accessibleUrl = await getAccessibleIpfsUrl(event.image_url);
+                                processedImageUrl = accessibleUrl;
+                                
+                                if (accessibleUrl !== event.image_url) {
+                                    console.log(`   ✅ Imagem otimizada: ${event.image_url} -> ${accessibleUrl}`);
+                                } else {
+                                    console.log(`   ⚠️  Usando URL original (fallback não necessário): ${event.image_url}`);
+                                }
+                            }
+                        } catch (ipfsError) {
+                            console.warn(`   ⚠️  Erro no fallback IPFS: ${ipfsError.message}`);
+                            // Mantém a URL original em caso de erro
+                        }
                     }
+
+                    // ✅ PROCESSAR METADADOS PARA ATUALIZAR URLS IPFS
+                    let processedMetadata = event.metadata;
+                    if (processedMetadata) {
+                        try {
+                            processedMetadata = await processIpfsUrlsInObject(processedMetadata);
+                        } catch (metadataError) {
+                            console.warn(`   ⚠️  Erro ao processar metadados IPFS: ${metadataError.message}`);
+                        }
+                    }
+
+                    // ✅ VERIFICAR SE A IMAGEM É ACESSÍVEL
+                    let finalImageUrl = processedImageUrl;
+                    try {
+                        const isAccessible = await checkUrlAccessibility(finalImageUrl, 3000);
+                        if (!isAccessible) {
+                            console.warn(`   ⚠️  Imagem não acessível: ${finalImageUrl}`);
+                            // Poderíamos adicionar um fallback de imagem padrão aqui se necessário
+                        }
+                    } catch (accessibilityError) {
+                        console.warn(`   ⚠️  Não foi possível verificar acessibilidade da imagem: ${accessibilityError.message}`);
+                    }
+
+                    return {
+                        ...event,
+                        image_url: finalImageUrl,
+                        metadata: processedMetadata
+                    };
+
+                } catch (error) {
+                    console.error(` ❌ Erro ao processar evento ${event.event_address}:`, error);
+                    // Retorna o evento original em caso de erro
+                    return event;
                 }
-                
-                return {
-                    ...event,
-                    image_url: processedImageUrl
-                };
             })
         );
 
-        console.log(`[📋] ${eventsWithFallbackImages.length} eventos ativos encontrados:`);
+        // Log dos eventos processados
         if (eventsWithFallbackImages.length > 0) {
+            console.log(`[📊] Eventos processados com sucesso:`);
             eventsWithFallbackImages.forEach((event, index) => {
                 const eventName = event.metadata?.name || 'Sem nome';
-                const startDate = new Date(event.sales_start_date * 1000).toLocaleDateString();
-                console.log(`   ${index + 1}. "${eventName}" | Início: ${startDate}`);
+                const startDate = new Date(event.sales_start_date * 1000).toLocaleDateString('pt-BR');
+                const imageSource = event.image_url !== event.image_url ? 'Fallback' : 'Original';
+                console.log(`   ${index + 1}. "${eventName}" | Início: ${startDate} | Imagem: ${imageSource}`);
             });
         }
 
@@ -128,7 +174,9 @@ export const getNextFourEvents = async (req, res) => {
                 maxTicketsPerWallet: event.max_tickets_per_wallet,
                 royaltyBps: event.royalty_bps,
                 metadataUri: event.metadata_url,
-                tiers: event.tiers || []
+                tiers: event.tiers || [],
+                totalTicketsSold: event.total_tickets_sold || 0,
+                maxTotalSupply: event.max_total_supply || 0
             },
             metadata: event.metadata,
             imageUrl: event.image_url, // ✅ Já com fallback aplicado
@@ -785,130 +833,202 @@ export const addValidatorGasless = async (req, res) => {
     }
 };
 export const getActiveEventsFast = async (req, res) => {
-    console.log('[⚡] API RÁPIDA: Buscando eventos ativos (Supabase + Blockchain)...');
-    const startTime = Date.now();
+  console.log('[⚡] API RÁPIDA: Buscando eventos ativos (Supabase + Blockchain)...');
+  const startTime = Date.now();
 
-    try {
-        // 1. Buscar eventos ativos do Supabase
-        const events = await getActiveEventsFromSupabase();
-        console.log(`[⚡] Encontrados ${events.length} eventos ativos no Supabase`);
+  try {
+    // ✅ 1. BUSCAR EVENTOS ATIVOS APENAS DO SUPABASE (MAIS RÁPIDO)
+    console.log('[⚡] Buscando eventos ativos APENAS do Supabase...');
+    
+    const { data: supabaseEvents, error } = await supabase
+      .from('events')
+      .select('*')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false });
 
-        // 2. Processar eventos em paralelo (versão simplificada)
-        console.log(' -> Buscando dados da blockchain...');
-        
-        const eventsWithBlockchainData = await Promise.all(
-            events.map(async (event) => {
-                try {
-                    const eventAddress = new PublicKey(event.event_address);
-                    const blockchainAccount = await program.account.event.fetch(eventAddress);
-                    
-                    // Processar tiers da blockchain
-                    const processedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
-                        const extractValue = (value) => {
-                            if (!value && value !== 0) return 0;
-                            if (value && typeof value.toNumber === 'function') {
-                                return value.toNumber();
-                            }
-                            return Number(value) || 0;
-                        };
+    if (error) {
+      console.error('❌ Erro ao buscar eventos no Supabase:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Erro ao buscar eventos'
+      });
+    }
 
-                        return {
-                            name: tier.name || `Tier ${index + 1}`,
-                            priceBrlCents: extractValue(tier.priceBrlCents),
-                            maxTicketsSupply: extractValue(tier.maxTicketsSupply),
-                            ticketsSold: extractValue(tier.ticketsSold),
-                            ticketsRemaining: extractValue(tier.maxTicketsSupply) - extractValue(tier.ticketsSold),
-                            isSoldOut: extractValue(tier.ticketsSold) >= extractValue(tier.maxTicketsSupply)
-                        };
-                    });
+    console.log(`[⚡] ${supabaseEvents?.length || 0} eventos ATIVOS carregados do Supabase em ${Date.now() - startTime}ms`);
 
-                    const totalTicketsSold = processedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
-                    const maxTotalSupply = processedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+    if (!supabaseEvents || supabaseEvents.length === 0) {
+      return res.status(200).json([]);
+    }
 
-                    return {
-                        ...event,
-                        blockchainTiers: processedTiers,
-                        totalTicketsSold,
-                        maxTotalSupply,
-                        ticketsAvailable: maxTotalSupply - totalTicketsSold
-                    };
+    console.log(`[⚡] Encontrados ${supabaseEvents.length} eventos ativos no Supabase`);
 
-                } catch (error) {
-                    console.warn(`[⚠️] Fallback para ${event.event_address}:`, error.message);
-                    // Fallback para dados do Supabase
-                    return event;
+    // ✅ 2. PROCESSAR CADA EVENTO COM FALLBACK DE IMAGEM MELHORADO
+    const processedEvents = await Promise.all(
+      supabaseEvents.map(async (event) => {
+        try {
+          let finalMetadata = event.metadata || {};
+          let finalImageUrl = event.image_url || '';
+          let finalOrganizerLogo = finalMetadata.organizer?.organizerLogo || '';
+
+          // ✅ 3. SE NÃO TEM METADADOS OU IMAGEM, TENTAR DA BLOCKCHAIN COMO FALLBACK
+          if ((!finalMetadata.name || finalMetadata.name === 'Evento Sem Nome') && event.event_address) {
+            console.log(` 🔄 Buscando dados da blockchain para fallback: ${event.event_address}`);
+            try {
+              const eventPubkey = new PublicKey(event.event_address);
+              const blockchainAccount = await program.account.event.fetch(eventPubkey);
+              
+              if (blockchainAccount.metadataUri) {
+                const ipfsMetadata = await fetchMetadataOptimized(blockchainAccount.metadataUri);
+                if (ipfsMetadata) {
+                  finalMetadata = { ...finalMetadata, ...ipfsMetadata };
+                  finalImageUrl = finalImageUrl || ipfsMetadata.image || '';
+                  finalOrganizerLogo = finalOrganizerLogo || ipfsMetadata.organizer?.organizerLogo || '';
                 }
-            })
-        );
+              }
+            } catch (blockchainError) {
+              console.warn(` ⚠️  Não foi possível buscar dados da blockchain para ${event.event_address}:`, blockchainError.message);
+            }
+          }
 
-        // 3. Formatar resposta
-        const formattedEvents = eventsWithBlockchainData.map(event => ({
+          // ✅ 4. APLICAR FALLBACK DE METADADOS SE NECESSÁRIO
+          if (!finalMetadata.name || finalMetadata.name === 'Evento Sem Nome') {
+            finalMetadata = {
+              ...finalMetadata,
+              name: event.event_name || "Evento em Andamento",
+              description: finalMetadata.description || "Estamos preparando as informações deste evento. Volte em breve para mais detalhes.",
+              category: finalMetadata.category || "Geral",
+              properties: finalMetadata.properties || {
+                dateTime: {
+                  start: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                  end: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+                  timezone: "America/Sao_Paulo"
+                },
+                location: {
+                  type: "Physical",
+                  venueName: "Local a ser definido",
+                  address: {
+                    city: "São Paulo",
+                    state: "SP",
+                    country: "BR"
+                  }
+                }
+              },
+              organizer: finalMetadata.organizer || {
+                name: "Organizador",
+                contactEmail: "contato@evento.com",
+                website: ""
+              },
+              additionalInfo: finalMetadata.additionalInfo || {
+                ageRestriction: "Livre",
+                accessibility: "Acessível",
+                complementaryHours: 0
+              }
+            };
+          }
+
+          // ✅ 5. PROCESSAR IMAGENS COM FALLBACK MELHORADO
+          try {
+            const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback({
+              image_url: finalImageUrl,
+              metadata: finalMetadata
+            });
+            
+            finalImageUrl = eventImageUrl;
+            finalOrganizerLogo = organizerLogoUrl;
+          } catch (imageError) {
+            console.warn(` ⚠️  Erro ao processar imagens para ${event.event_address}:`, imageError.message);
+          }
+
+          // ✅ 6. ESTRUTURA FINAL DO EVENTO
+          return {
             publicKey: event.event_address,
             account: {
-                eventId: event.event_id,
-                controller: event.controller,
-                salesStartDate: { toNumber: () => event.sales_start_date },
-                salesEndDate: { toNumber: () => event.sales_end_date },
-                maxTicketsPerWallet: event.max_tickets_per_wallet,
-                royaltyBps: event.royalty_bps,
-                metadataUri: event.metadata_url,
-                tiers: event.blockchainTiers || event.tiers || [],
-                totalTicketsSold: event.totalTicketsSold || 0,
-                maxTotalSupply: event.maxTotalSupply || 0
+              eventId: event.event_id,
+              controller: event.controller,
+              salesStartDate: { toNumber: () => event.sales_start_date },
+              salesEndDate: { toNumber: () => event.sales_end_date },
+              maxTicketsPerWallet: event.max_tickets_per_wallet || 1,
+              royaltyBps: event.royalty_bps || 0,
+              metadataUri: event.metadata_url,
+              tiers: event.tiers || [],
+              totalTicketsSold: event.total_tickets_sold || 0,
+              maxTotalSupply: event.max_total_supply || 0,
+              revenue: event.revenue || 0,
+              isActive: event.is_active ?? true,
+              canceled: event.canceled ?? false,
+              state: 1
             },
-            metadata: event.metadata,
-            imageUrl: event.image_url,
-            ticketInfo: {
-                totalTicketsSold: event.totalTicketsSold || 0,
-                maxTotalSupply: event.maxTotalSupply || 0,
-                ticketsAvailable: event.ticketsAvailable || 0,
-                startingPrice: event.startingPrice || 0,
-                tiersCount: (event.blockchainTiers || event.tiers || []).length
-            }
-        }));
+            metadata: finalMetadata,
+            imageUrl: finalImageUrl,
+            organizerLogo: finalOrganizerLogo,
+          };
 
-        const duration = Date.now() - startTime;
-        console.log(`[⚡] API RÁPIDA: ${formattedEvents.length} eventos processados em ${duration}ms`);
+        } catch (error) {
+          console.error(`❌ Erro ao processar evento ${event.event_address}:`, error);
+          return null;
+        }
+      })
+    );
 
-        res.status(200).json(formattedEvents);
+    // ✅ 7. FILTRAR EVENTOS VÁLIDOS
+    const validEvents = processedEvents.filter(event => event !== null);
+    
+    const totalDuration = Date.now() - startTime;
+    console.log(`[⚡] API RÁPIDA: ${validEvents.length} eventos processados em ${totalDuration}ms`);
 
-    } catch (error) {
-        console.error("[❌] Erro na API rápida de eventos:", error);
-        res.status(500).json({
-            error: "Erro ao buscar eventos",
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
+    res.status(200).json(validEvents);
+
+  } catch (error) {
+    console.error('[❌] Erro crítico na API rápida de eventos:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Erro interno do servidor ao buscar eventos',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 };
-
-
-// Lista de gateways IPFS em ordem de prioridade
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
-  'https://gateway.pinata.cloud/ipfs/',
+  'https://gateway.ipfs.io/ipfs/',
+  'https://cf-ipfs.com/ipfs/',
   'https://dweb.link/ipfs/',
+  'https://ipfs.fleek.co/ipfs/',
+  'https://gateway.pinata.cloud/ipfs/' // Menor prioridade - movido para o final
+];
+
+// Gateways públicos confiáveis que geralmente funcionam melhor
+const PUBLIC_GATEWAYS = [
+  'https://cloudflare-ipfs.com/ipfs/',
+  'https://ipfs.io/ipfs/',
+  'https://gateway.ipfs.io/ipfs/',
   'https://cf-ipfs.com/ipfs/'
 ];
 
-// Timeout para as requisições (em milissegundos)
-const GATEWAY_TIMEOUT = 5000;
+// Timeout reduzido para gateways mais rápidos
+const FAST_TIMEOUT = 2000;
+const SLOW_TIMEOUT = 4000;
 
 /**
- * Extrai o CID de uma URL IPFS
+ * Extrai o CID de uma URL IPFS - versão melhorada
  */
 function extractCID(ipfsUrl) {
   if (!ipfsUrl) return null;
+  
+  // Remove query parameters e fragments
+  const cleanUrl = ipfsUrl.split('?')[0].split('#')[0];
   
   // Padrões comuns de URLs IPFS
   const patterns = [
     /\/ipfs\/([a-zA-Z0-9]+)/, // URL com gateway: https://gateway.pinata.cloud/ipfs/Qm...
     /^(Qm[1-9A-HJ-NP-Za-km-z]{44})/, // CID direto: Qm...
     /^bafybei[a-zA-Z0-9]+/, // CID v1: bafybei...
+    /ipfs\/([a-zA-Z0-9]+)/, // Padrão alternativo
   ];
 
   for (const pattern of patterns) {
-    const match = ipfsUrl.match(pattern);
+    const match = cleanUrl.match(pattern);
     if (match) {
       return match[1] || match[0];
     }
@@ -918,59 +1038,128 @@ function extractCID(ipfsUrl) {
 }
 
 /**
- * Verifica se uma URL é acessível
+ * Verifica se uma URL é acessível - versão melhorada com retry
  */
-async function checkUrlAccessibility(url) {
+async function checkUrlAccessibility(url, timeout = FAST_TIMEOUT) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
   try {
-    const response = await axios.head(url, {
-      timeout: GATEWAY_TIMEOUT,
-      validateStatus: (status) => status === 200
+    // Usamos HEAD para ser mais rápido, mas se falhar tentamos GET
+    const response = await fetch(url, {
+      method: 'HEAD',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; IPFS-Gateway-Check/1.0)'
+      }
     });
     
-    return response.status === 200;
+    clearTimeout(timeoutId);
+    
+    // Aceita 200, 206 (partial content), 304 (not modified)
+    if (response.ok || response.status === 206 || response.status === 304) {
+      return true;
+    }
+    
+    // Se HEAD não é suportado, tentamos GET com range
+    if (response.status === 405) {
+      return await checkWithGet(url, timeout);
+    }
+    
+    return false;
   } catch (error) {
-    // Ignora erros 429 (Too Many Requests) e outros
+    clearTimeout(timeoutId);
     return false;
   }
 }
 
 /**
- * Tenta acessar uma imagem IPFS através de múltiplos gateways
+ * Verifica com método GET como fallback
+ */
+async function checkWithGet(url, timeout) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        'Range': 'bytes=0-0', // Pega apenas os primeiros bytes
+        'User-Agent': 'Mozilla/5.0 (compatible; IPFS-Gateway-Check/1.0)'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    return response.ok || response.status === 206;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return false;
+  }
+}
+
+/**
+ * Tenta acessar uma imagem IPFS através de múltiplos gateways - versão melhorada
  */
 async function getAccessibleIpfsUrl(ipfsUrl) {
   if (!ipfsUrl) return ipfsUrl;
 
-  // Se não é uma URL IPFS, retorna original
   const cid = extractCID(ipfsUrl);
-  if (!cid) return ipfsUrl;
-
-  // Tenta a URL original primeiro (pode ser um gateway que funciona)
-  try {
-    if (await checkUrlAccessibility(ipfsUrl)) {
-      console.log(` ✅ Gateway original funcionando: ${ipfsUrl}`);
-      return ipfsUrl;
-    }
-  } catch (error) {
-    // Continua para outros gateways
+  if (!cid) {
+    console.log(` ⚠️  Não é uma URL IPFS válida: ${ipfsUrl}`);
+    return ipfsUrl;
   }
 
-  // Testa gateways alternativos
-  for (const gateway of IPFS_GATEWAYS) {
+  console.log(` 🔍 Buscando CID: ${cid}`);
+
+  // Primeiro: tenta gateways públicos rápidos
+  for (const gateway of PUBLIC_GATEWAYS) {
     const gatewayUrl = `${gateway}${cid}`;
     
-    // Pula o gateway se for o mesmo da URL original
+    // Pula se for o mesmo da URL original
     if (gatewayUrl === ipfsUrl) continue;
     
     try {
-      console.log(` 🔄 Tentando gateway: ${gateway}`);
+      console.log(` 🚀 Tentando gateway rápido: ${gateway}`);
       
-      if (await checkUrlAccessibility(gatewayUrl)) {
-        console.log(` ✅ Gateway funcionando: ${gateway}`);
+      if (await checkUrlAccessibility(gatewayUrl, FAST_TIMEOUT)) {
+        console.log(` ✅ Gateway rápido funcionando: ${gateway}`);
         return gatewayUrl;
       }
     } catch (error) {
-      // Continua para o próximo gateway
-      console.log(` ❌ Gateway falhou: ${gateway}`);
+      console.log(` ❌ Gateway rápido falhou: ${gateway}`);
+    }
+  }
+
+  // Segundo: tenta a URL original (pode ser um gateway específico)
+  try {
+    console.log(` 🔄 Tentando URL original: ${ipfsUrl}`);
+    
+    if (await checkUrlAccessibility(ipfsUrl, SLOW_TIMEOUT)) {
+      console.log(` ✅ URL original funcionando: ${ipfsUrl}`);
+      return ipfsUrl;
+    }
+  } catch (error) {
+    console.log(` ❌ URL original falhou: ${ipfsUrl}`);
+  }
+
+  // Terceiro: tenta gateways restantes com timeout maior
+  const remainingGateways = IPFS_GATEWAYS.filter(g => 
+    !PUBLIC_GATEWAYS.includes(g) && `${g}${cid}` !== ipfsUrl
+  );
+
+  for (const gateway of remainingGateways) {
+    const gatewayUrl = `${gateway}${cid}`;
+    
+    try {
+      console.log(` 🐌 Tentando gateway lento: ${gateway}`);
+      
+      if (await checkUrlAccessibility(gatewayUrl, SLOW_TIMEOUT)) {
+        console.log(` ✅ Gateway lento funcionando: ${gateway}`);
+        return gatewayUrl;
+      }
+    } catch (error) {
+      console.log(` ❌ Gateway lento falhou: ${gateway}`);
     }
   }
 
@@ -980,7 +1169,7 @@ async function getAccessibleIpfsUrl(ipfsUrl) {
 }
 
 /**
- * Processa recursivamente um objeto para substituir URLs IPFS
+ * Processa URLs IPFS com cache e fallback inteligente
  */
 async function processIpfsUrlsInObject(obj, processedUrls = new Map()) {
   if (!obj || typeof obj !== 'object') return obj;
@@ -995,9 +1184,20 @@ async function processIpfsUrlsInObject(obj, processedUrls = new Map()) {
       if (processedUrls.has(value)) {
         result[key] = processedUrls.get(value);
       } else {
-        const processedUrl = await getAccessibleIpfsUrl(value);
-        result[key] = processedUrl;
-        processedUrls.set(value, processedUrl);
+        try {
+          const processedUrl = await getAccessibleIpfsUrl(value);
+          result[key] = processedUrl;
+          processedUrls.set(value, processedUrl);
+          
+          // Log apenas se a URL foi alterada
+          if (processedUrl !== value) {
+            console.log(` 🔄 URL otimizada: ${value} -> ${processedUrl}`);
+          }
+        } catch (error) {
+          console.warn(` ❌ Erro ao processar URL: ${value}`, error.message);
+          result[key] = value; // Mantém original em caso de erro
+          processedUrls.set(value, value);
+        }
       }
     } else if (typeof value === 'object' && value !== null) {
       result[key] = await processIpfsUrlsInObject(value, processedUrls);
@@ -1010,10 +1210,10 @@ async function processIpfsUrlsInObject(obj, processedUrls = new Map()) {
 }
 
 /**
- * Função principal: Substitui URLs IPFS por URLs acessíveis
+ * Função principal: Substitui URLs IPFS por URLs acessíveis - versão melhorada
  */
 async function getImagesWithFallback(supabaseEvent) {
-  console.log(' 🖼️  Processando URLs IPFS com fallback...');
+  console.log(' 🖼️  Processando URLs IPFS com fallback inteligente...');
   
   if (!supabaseEvent) {
     return {
@@ -1025,15 +1225,17 @@ async function getImagesWithFallback(supabaseEvent) {
   try {
     // Cria uma cópia profunda para não modificar o original
     const processedEvent = JSON.parse(JSON.stringify(supabaseEvent));
+    const processedUrls = new Map();
     
-    // Processa image_url direto
+    // Processa image_url direto primeiro
     if (processedEvent.image_url) {
       processedEvent.image_url = await getAccessibleIpfsUrl(processedEvent.image_url);
+      processedUrls.set(supabaseEvent.image_url, processedEvent.image_url);
     }
 
     // Processa metadados recursivamente
     if (processedEvent.metadata) {
-      processedEvent.metadata = await processIpfsUrlsInObject(processedEvent.metadata);
+      processedEvent.metadata = await processIpfsUrlsInObject(processedEvent.metadata, processedUrls);
     }
 
     // Extrai as URLs finais
@@ -1044,7 +1246,8 @@ async function getImagesWithFallback(supabaseEvent) {
 
     console.log(' ✅ URLs IPFS processadas com sucesso');
     console.log(`   - Event Image: ${eventImageUrl}`);
-    console.log(`   - Organizer Logo: ${organizerLogoUrl}`);
+    console.log(`   - Organizer Logo: ${organizerLogoUrl || 'Não disponível'}`);
+    console.log(`   - Total de URLs processadas: ${processedUrls.size}`);
 
     return {
       eventImageUrl,
@@ -1064,7 +1267,6 @@ async function getImagesWithFallback(supabaseEvent) {
   }
 }
 
-// ✅ INTEGRAÇÃO NA SUA ROTA EXISTENTE
 export const getEventDetailsFast = async (req, res) => {
   const { eventAddress } = req.params;
   
@@ -1075,172 +1277,294 @@ export const getEventDetailsFast = async (req, res) => {
     });
   }
 
-  console.log(`[🔍] BUSCA DIRETA NA BLOCKCHAIN: ${eventAddress}`);
+  console.log(`[🔍] BUSCA ULTRA-RÁPIDA: ${eventAddress}`);
   const startTime = Date.now();
 
   try {
     const eventPubkey = new PublicKey(eventAddress);
     
-    // ✅ BUSCA DIRETA NA BLOCKCHAIN - SEM CACHE
-    console.log(' -> Buscando dados diretamente da blockchain...');
-    let blockchainAccount;
-    try {
-      blockchainAccount = await program.account.event.fetch(eventPubkey);
-      console.log(' ✅ Dados brutos da blockchain recebidos');
-      
-      // ✅ DEBUG: Log da estrutura completa
-      console.log('🔍 ESTRUTURA DO EVENTO NA BLOCKCHAIN:');
-      console.log('- eventId:', blockchainAccount.eventId?.toString());
-      console.log('- controller:', blockchainAccount.controller?.toString());
-      console.log('- totalTicketsSold:', blockchainAccount.totalTicketsSold?.toString());
-      console.log('- tiers count:', blockchainAccount.tiers?.length || 0);
-      
-      if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
-        blockchainAccount.tiers.forEach((tier, index) => {
-          console.log(`🎫 Tier ${index}:`);
-          console.log('   - name:', tier.name);
-          console.log('   - priceBrlCents:', tier.priceBrlCents?.toString());
-          console.log('   - maxTicketsSupply:', tier.maxTicketsSupply?.toString());
-          console.log('   - ticketsSold:', tier.ticketsSold?.toString());
-        });
-      }
-    } catch (error) {
-      console.error(' ❌ Erro ao buscar evento na blockchain:', error);
-      return res.status(404).json({
-        success: false,
-        error: "Evento não encontrado na blockchain."
-      });
-    }
-
-    // ✅ Buscar metadados do Supabase apenas para display
+    // ✅ 1. PRIMEIRO: Buscar do Supabase (mais rápido)
+    console.log(' -> Buscando dados do Supabase...');
+    let supabaseEvent = null;
     let finalMetadata = {};
     let finalImageUrl = '';
     let finalOrganizerLogo = '';
 
     try {
-      const supabaseEvent = await getEventFromSupabase(eventAddress);
-      
-      // ✅ NOVO: PROCESSAMENTO DE IMAGENS COM FALLBACK
-      const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback(supabaseEvent);
-      
-      finalMetadata = supabaseEvent.metadata || {};
-      finalImageUrl = eventImageUrl;
-      finalOrganizerLogo = organizerLogoUrl;
-      
-      console.log(' ✅ Metadados do Supabase carregados com fallback IPFS');
-    } catch (error) {
-      console.warn(' ⚠️  Supabase não disponível, usando metadados fallback');
+      const { data: event, error } = await supabase
+        .from('events')
+        .select('*')
+        .eq('event_address', eventAddress)
+        .single();
+
+      if (!error && event) {
+        supabaseEvent = event;
+        console.log(` ✅ Evento encontrado no Supabase: "${event.metadata?.name || 'Sem nome'}"`);
+        
+        // ✅ EXTRAIR DADOS REAIS DO SUPABASE
+        finalMetadata = event.metadata || {};
+        finalImageUrl = event.image_url || '';
+        finalOrganizerLogo = event.metadata?.organizer?.organizerLogo || '';
+        
+        console.log(' 📊 Dados extraídos do Supabase:', {
+          name: finalMetadata.name,
+          hasDescription: !!finalMetadata.description,
+          hasLocation: !!finalMetadata.properties?.location,
+          hasDateTime: !!finalMetadata.properties?.dateTime,
+          hasOrganizer: !!finalMetadata.organizer,
+          tiersCount: event.tiers?.length || 0
+        });
+      } else {
+        console.warn(' ⚠️  Evento não encontrado no Supabase:', error?.message);
+      }
+    } catch (supabaseError) {
+      console.warn(' ⚠️  Erro ao buscar do Supabase:', supabaseError.message);
+    }
+
+    // ✅ 2. BUSCAR DADOS DA BLOCKCHAIN PARA TICKETS E TIERS
+    console.log(' -> Buscando dados completos da blockchain...');
+    let blockchainAccount = null;
+    let blockchainTiers = [];
+    let totalTicketsSold = 0;
+    let maxTotalSupply = 0;
+
+    try {
+      blockchainAccount = await program.account.event.fetch(eventPubkey);
+      console.log(' ✅ Dados da blockchain recebidos');
+
+      // ✅ PROCESSAR TIERS DA BLOCKCHAIN CORRETAMENTE
+      if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
+        console.log(` -> Processando ${blockchainAccount.tiers.length} tiers da blockchain...`);
+        
+        blockchainTiers = blockchainAccount.tiers.map((tier, index) => {
+          // ✅ EXTRAIR VALORES CORRETAMENTE DOS BN (BigNumber)
+          let priceBrlCents = 0;
+          let maxTicketsSupply = 0;
+          let ticketsSold = 0;
+
+          try {
+            // Preço em centavos
+            if (tier.priceBrlCents) {
+              priceBrlCents = typeof tier.priceBrlCents.toNumber === 'function' 
+                ? tier.priceBrlCents.toNumber() 
+                : Number(tier.priceBrlCents);
+            }
+
+            // Supply máximo
+            if (tier.maxTicketsSupply) {
+              maxTicketsSupply = typeof tier.maxTicketsSupply.toNumber === 'function'
+                ? tier.maxTicketsSupply.toNumber()
+                : Number(tier.maxTicketsSupply);
+            }
+
+            // Tickets vendidos
+            if (tier.ticketsSold) {
+              ticketsSold = typeof tier.ticketsSold.toNumber === 'function'
+                ? tier.ticketsSold.toNumber()
+                : Number(tier.ticketsSold);
+            }
+          } catch (error) {
+            console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
+          }
+
+          const ticketsRemaining = maxTicketsSupply - ticketsSold;
+          
+          return {
+            name: tier.name || `Tier ${index + 1}`,
+            priceBrlCents: priceBrlCents,
+            priceBrl: (priceBrlCents / 100).toFixed(2),
+            maxTicketsSupply: maxTicketsSupply,
+            ticketsSold: ticketsSold,
+            ticketsRemaining: ticketsRemaining,
+            isSoldOut: ticketsRemaining <= 0
+          };
+        });
+
+        // ✅ CALCULAR TOTAIS DOS TIERS
+        totalTicketsSold = blockchainTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+        maxTotalSupply = blockchainTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+
+        console.log(` ✅ Tiers processados: ${blockchainTiers.length} tiers, ${totalTicketsSold}/${maxTotalSupply} tickets`);
+      }
+
+      // ✅ TENTAR USAR total_tickets_sold DA CONTA SE DISPONÍVEL
+      if (blockchainAccount.totalTicketsSold) {
+        try {
+          const accountTotalSold = typeof blockchainAccount.totalTicketsSold.toNumber === 'function'
+            ? blockchainAccount.totalTicketsSold.toNumber()
+            : Number(blockchainAccount.totalTicketsSold);
+          
+          if (accountTotalSold > totalTicketsSold) {
+            console.log(` 🔄 Usando totalTicketsSold da conta: ${accountTotalSold}`);
+            totalTicketsSold = accountTotalSold;
+          }
+        } catch (error) {
+          console.warn(' ❌ Erro ao processar totalTicketsSold da conta:', error.message);
+        }
+      }
+
+      // ✅ BUSCAR METADADOS DO IPFS SE NÃO ENCONTRADOS NO SUPABASE
+      if (!supabaseEvent && blockchainAccount.metadataUri) {
+        try {
+          console.log(' -> Buscando metadados do IPFS...');
+          const ipfsMetadata = await fetchMetadataOptimized(blockchainAccount.metadataUri);
+          if (ipfsMetadata) {
+            finalMetadata = ipfsMetadata;
+            finalImageUrl = ipfsMetadata.image || '';
+            finalOrganizerLogo = ipfsMetadata.organizer?.organizerLogo || '';
+            console.log(' ✅ Metadados carregados do IPFS');
+          }
+        } catch (ipfsError) {
+          console.warn(' ⚠️  Erro ao buscar metadados do IPFS:', ipfsError.message);
+        }
+      }
+
+    } catch (blockchainError) {
+      console.error(' ❌ Erro ao buscar evento na blockchain:', blockchainError);
+      // Não retornamos erro aqui, pois podemos usar dados do Supabase
+    }
+
+    // ✅ 3. SE NÃO ENCONTROU METADADOS, USAR FALLBACK
+    if (!finalMetadata.name || finalMetadata.name === 'Evento Sem Nome') {
+      console.warn(' ⚠️  Usando metadados fallback aprimorados');
       finalMetadata = {
-        name: "Evento Sem Nome",
-        description: "Descrição não disponível",
-        properties: {}
+        name: "Evento em Andamento",
+        description: "Estamos preparando as informações deste evento. Volte em breve para mais detalhes.",
+        category: "Geral",
+        properties: {
+          dateTime: {
+            start: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+            end: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+            timezone: "America/Sao_Paulo"
+          },
+          location: {
+            type: "Physical",
+            venueName: "Local a ser definido",
+            address: {
+              city: "São Paulo",
+              state: "SP",
+              country: "BR"
+            }
+          }
+        },
+        organizer: {
+          name: "Organizador",
+          contactEmail: "contato@evento.com",
+          website: ""
+        },
+        additionalInfo: {
+          ageRestriction: "Livre",
+          accessibility: "Acessível",
+          complementaryHours: 0
+        }
       };
     }
 
-    // ✅ CORREÇÃO CRÍTICA: Processar tiers DIRETAMENTE da blockchain
-    const formattedTiers = (blockchainAccount.tiers || []).map((tier, index) => {
-      // ✅ EXTRAÇÃO DIRETA DOS VALORES - SEM ASSUNÇÕES
-      let priceBrlCents = 0;
-      let maxTicketsSupply = 0;
-      let ticketsSold = 0;
-
-      // Tentar diferentes formas de extrair os valores
-      try {
-        // Método 1: Se for BN object
-        if (tier.priceBrlCents && typeof tier.priceBrlCents.toNumber === 'function') {
-          priceBrlCents = tier.priceBrlCents.toNumber();
-        } else if (tier.priceBrlCents !== undefined && tier.priceBrlCents !== null) {
-          // Método 2: Se já for número
-          priceBrlCents = Number(tier.priceBrlCents);
-        }
-
-        if (tier.maxTicketsSupply && typeof tier.maxTicketsSupply.toNumber === 'function') {
-          maxTicketsSupply = tier.maxTicketsSupply.toNumber();
-        } else if (tier.maxTicketsSupply !== undefined && tier.maxTicketsSupply !== null) {
-          maxTicketsSupply = Number(tier.maxTicketsSupply);
-        }
-
-        if (tier.ticketsSold && typeof tier.ticketsSold.toNumber === 'function') {
-          ticketsSold = tier.ticketsSold.toNumber();
-        } else if (tier.ticketsSold !== undefined && tier.ticketsSold !== null) {
-          ticketsSold = Number(tier.ticketsSold);
-        }
-      } catch (error) {
-        console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
-      }
-
-      const ticketsRemaining = maxTicketsSupply - ticketsSold;
+    // ✅ 4. PROCESSAR IMAGENS COM FALLBACK MELHORADO
+    try {
+      const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback({
+        image_url: finalImageUrl,
+        metadata: finalMetadata
+      });
       
-      console.log(`🎫 Tier ${index} processado:`, {
-        name: tier.name,
-        priceBrlCents,
-        maxTicketsSupply,
-        ticketsSold,
-        ticketsRemaining
+      finalImageUrl = eventImageUrl;
+      finalOrganizerLogo = organizerLogoUrl;
+      console.log(' ✅ Imagens processadas com fallback');
+    } catch (imageError) {
+      console.warn(' ⚠️  Erro ao processar imagens:', imageError.message);
+    }
+
+    // ✅ 5. USAR TIERS DA BLOCKCHAIN (PREFERÊNCIA) OU DO SUPABASE
+    let formattedTiers = blockchainTiers;
+    
+    // Se não tem tiers da blockchain, tentar do Supabase
+    if (formattedTiers.length === 0 && supabaseEvent?.tiers) {
+      console.log(' -> Usando tiers do Supabase como fallback...');
+      formattedTiers = (supabaseEvent.tiers || []).map((tier, index) => {
+        const maxTicketsSupply = Number(tier.maxTicketsSupply || tier.max_tickets_supply || 0);
+        const ticketsSold = Number(tier.ticketsSold || tier.tickets_sold || 0);
+        const priceBrlCents = Number(tier.priceBrlCents || tier.price_brl_cents || 0);
+        
+        return {
+          name: tier.name || `Tier ${index + 1}`,
+          priceBrlCents: priceBrlCents,
+          priceBrl: (priceBrlCents / 100).toFixed(2),
+          maxTicketsSupply: maxTicketsSupply,
+          ticketsSold: ticketsSold,
+          ticketsRemaining: maxTicketsSupply - ticketsSold,
+          isSoldOut: (maxTicketsSupply - ticketsSold) <= 0
+        };
       });
 
-      return {
-        name: tier.name || `Tier ${index + 1}`,
-        priceBrlCents: priceBrlCents,
-        maxTicketsSupply: maxTicketsSupply,
-        ticketsSold: ticketsSold,
-        ticketsRemaining: ticketsRemaining,
-        isSoldOut: ticketsSold >= maxTicketsSupply
-      };
-    });
+      // Recalcular totais se usando tiers do Supabase
+      if (totalTicketsSold === 0) {
+        totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+      }
+      if (maxTotalSupply === 0) {
+        maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+      }
+    }
 
-    // ✅ Calcular totais baseados nos tiers processados
-    const totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
-    const maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
-
-    // ✅ ESTRUTURA FINAL DO EVENTO
+    // ✅ 6. ESTRUTURA FINAL COMPLETA DO EVENTO
     const eventData = {
       publicKey: eventAddress,
       account: {
         // Dados básicos do evento
-        eventId: blockchainAccount.eventId,
-        controller: blockchainAccount.controller.toString(),
-        salesStartDate: blockchainAccount.salesStartDate,
-        salesEndDate: blockchainAccount.salesEndDate,
-        maxTicketsPerWallet: blockchainAccount.maxTicketsPerWallet?.toNumber?.() || 1,
-        royaltyBps: blockchainAccount.royaltyBps?.toNumber?.() || 0,
-        metadataUri: blockchainAccount.metadataUri,
+        eventId: blockchainAccount?.eventId || supabaseEvent?.event_id,
+        controller: blockchainAccount?.controller?.toString() || supabaseEvent?.controller,
+        salesStartDate: blockchainAccount?.salesStartDate || { toNumber: () => supabaseEvent?.sales_start_date },
+        salesEndDate: blockchainAccount?.salesEndDate || { toNumber: () => supabaseEvent?.sales_end_date },
+        maxTicketsPerWallet: blockchainAccount?.maxTicketsPerWallet?.toNumber?.() || supabaseEvent?.max_tickets_per_wallet || 1,
+        royaltyBps: blockchainAccount?.royaltyBps?.toNumber?.() || supabaseEvent?.royalty_bps || 0,
+        metadataUri: blockchainAccount?.metadataUri || supabaseEvent?.metadata_url,
         
-        // ✅ TIERS PROCESSADOS DA BLOCKCHAIN
+        // ✅ TIERS PROCESSADOS COM DADOS DE TICKETS
         tiers: formattedTiers,
         
-        // Dados dinâmicos
+        // ✅ DADOS DE TICKETS VENDIDOS (AGORA CORRETOS)
         totalTicketsSold: totalTicketsSold,
         maxTotalSupply: maxTotalSupply,
-        revenue: blockchainAccount.revenue?.toNumber?.() || 0,
-        isActive: blockchainAccount.isActive,
-        canceled: blockchainAccount.canceled,
-        validators: (blockchainAccount.validators || []).map(v => v.toString()),
-        state: blockchainAccount.state
+        
+        // Outros dados
+        revenue: blockchainAccount?.revenue?.toNumber?.() || 0,
+        isActive: blockchainAccount?.isActive ?? true,
+        canceled: blockchainAccount?.canceled ?? false,
+        validators: (blockchainAccount?.validators || []).map(v => v.toString()),
+        state: blockchainAccount?.state || 1
       },
       metadata: finalMetadata,
       imageUrl: finalImageUrl,
-      organizerLogo: finalOrganizerLogo, // ✅ NOVO: Logo do organizador processado
+      organizerLogo: finalOrganizerLogo,
+      
+      // ✅ ESTATÍSTICAS ADICIONAIS
+      stats: {
+        progressPercentage: maxTotalSupply > 0 ? Math.round((totalTicketsSold / maxTotalSupply) * 100) : 0,
+        soldOutTiers: formattedTiers.filter(tier => tier.isSoldOut).length,
+        availableTiers: formattedTiers.filter(tier => !tier.isSoldOut && tier.ticketsRemaining > 0).length
+      }
     };
 
     const duration = Date.now() - startTime;
     console.log(`[✅] DETALHES CARREGADOS EM ${duration}ms`);
-    console.log(` -> Tiers processados: ${formattedTiers.length}`);
-    console.log(` -> Ingressos totais: ${totalTicketsSold}/${maxTotalSupply} vendidos`);
-    
-    // ✅ LOG FINAL PARA CONFIRMAÇÃO
-    formattedTiers.forEach((tier, index) => {
-      console.log(`   Tier "${tier.name}": ${tier.ticketsSold}/${tier.maxTicketsSupply} vendidos`);
-    });
+    console.log(` 📊 RESUMO DO EVENTO:`);
+    console.log(`   - Nome: ${finalMetadata.name}`);
+    console.log(`   - Tiers: ${formattedTiers.length}`);
+    console.log(`   - Ingressos: ${totalTicketsSold}/${maxTotalSupply} vendidos (${eventData.stats.progressPercentage}%)`);
+    console.log(`   - Tiers esgotados: ${eventData.stats.soldOutTiers}`);
+    console.log(`   - Fonte: ${supabaseEvent ? 'Supabase' : blockchainAccount ? 'Blockchain' : 'Fallback'}`);
 
     res.status(200).json({
       success: true,
       event: eventData,
       dataSources: {
-        blockchain: true,
-        tiersSource: 'blockchain-diret',
-        metadataSource: 'supabase',
-        ipfsFallback: true // ✅ NOVO: Indica que o fallback IPFS foi aplicado
+        blockchain: !!blockchainAccount,
+        supabase: !!supabaseEvent,
+        ipfsFallback: true,
+        usedFallback: !supabaseEvent && !blockchainAccount
+      },
+      performance: {
+        duration: duration,
+        source: supabaseEvent ? 'supabase' : blockchainAccount ? 'blockchain' : 'fallback'
       }
     });
 
@@ -1262,6 +1586,116 @@ export const getEventDetailsFast = async (req, res) => {
   }
 };
 
+// ✅ FUNÇÃO AUXILIAR PARA ATUALIZAR SUPABASE COM DADOS DE TICKETS
+export const updateEventTicketsInSupabase = async (eventAddress, tiers, totalTicketsSold, maxTotalSupply) => {
+  try {
+    console.log(`[🔄] Atualizando dados de tickets no Supabase: ${eventAddress}`);
+    
+    const { error } = await supabase
+      .from('events')
+      .update({
+        tiers: tiers,
+        total_tickets_sold: totalTicketsSold,
+        max_total_supply: maxTotalSupply,
+        updated_at: new Date().toISOString()
+      })
+      .eq('event_address', eventAddress);
+
+    if (error) {
+      console.warn(' ⚠️  Erro ao atualizar tickets no Supabase:', error.message);
+      return false;
+    }
+
+    console.log(' ✅ Dados de tickets atualizados no Supabase');
+    return true;
+  } catch (error) {
+    console.warn(' ⚠️  Erro ao atualizar Supabase:', error.message);
+    return false;
+  }
+};
+
+// ✅ API PARA SINCRONIZAR DADOS DE TICKETS MANUALMENTE
+export const syncEventTickets = async (req, res) => {
+  const { eventAddress } = req.params;
+
+  console.log(`[🔄] SINCRONIZANDO TICKETS: ${eventAddress}`);
+  
+  try {
+    const eventPubkey = new PublicKey(eventAddress);
+    
+    // Buscar dados atualizados da blockchain
+    const blockchainAccount = await program.account.event.fetch(eventPubkey);
+    
+    let totalTicketsSold = 0;
+    let maxTotalSupply = 0;
+    const formattedTiers = [];
+
+    if (blockchainAccount.tiers && blockchainAccount.tiers.length > 0) {
+      blockchainAccount.tiers.forEach((tier, index) => {
+        let priceBrlCents = 0;
+        let maxTicketsSupply = 0;
+        let ticketsSold = 0;
+
+        try {
+          if (tier.priceBrlCents) {
+            priceBrlCents = typeof tier.priceBrlCents.toNumber === 'function' 
+              ? tier.priceBrlCents.toNumber() 
+              : Number(tier.priceBrlCents);
+          }
+          if (tier.maxTicketsSupply) {
+            maxTicketsSupply = typeof tier.maxTicketsSupply.toNumber === 'function'
+              ? tier.maxTicketsSupply.toNumber()
+              : Number(tier.maxTicketsSupply);
+          }
+          if (tier.ticketsSold) {
+            ticketsSold = typeof tier.ticketsSold.toNumber === 'function'
+              ? tier.ticketsSold.toNumber()
+              : Number(tier.ticketsSold);
+          }
+        } catch (error) {
+          console.warn(` ❌ Erro ao processar tier ${index}:`, error.message);
+        }
+
+        formattedTiers.push({
+          name: tier.name || `Tier ${index + 1}`,
+          priceBrlCents: priceBrlCents,
+          maxTicketsSupply: maxTicketsSupply,
+          ticketsSold: ticketsSold,
+          ticketsRemaining: maxTicketsSupply - ticketsSold,
+          isSoldOut: (maxTicketsSupply - ticketsSold) <= 0
+        });
+
+        totalTicketsSold += ticketsSold;
+        maxTotalSupply += maxTicketsSupply;
+      });
+    }
+
+    // Atualizar no Supabase
+    const updateSuccess = await updateEventTicketsInSupabase(
+      eventAddress,
+      formattedTiers,
+      totalTicketsSold,
+      maxTotalSupply
+    );
+
+    res.status(200).json({
+      success: true,
+      updated: updateSuccess,
+      stats: {
+        totalTicketsSold,
+        maxTotalSupply,
+        tiersCount: formattedTiers.length
+      }
+    });
+
+  } catch (error) {
+    console.error('[❌] Erro ao sincronizar tickets:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erro ao sincronizar dados de tickets'
+    });
+  }
+};
 
 // Busca eventos para gestão - APENAS do Supabase
 export const getEventsForManagementFast = async (req, res) => {
@@ -1639,62 +2073,136 @@ export const getEventForManagement = async (req, res) => {
         const eventPubkey = new PublicKey(eventAddress);
         const userPubkey = new PublicKey(userPublicKey);
 
-        // Buscar dados em paralelo
-        const [eventAccount, reserveBalance, metadata] = await Promise.all([
-            program.account.event.fetch(eventPubkey),
+        // ✅ BUSCAR CONTA DO EVENTO PRIMEIRO
+        console.log(' -> Buscando conta do evento...');
+        let eventAccount;
+        try {
+            eventAccount = await program.account.event.fetch(eventPubkey);
+            console.log(' ✅ Conta do evento encontrada');
+        } catch (error) {
+            console.error(' ❌ Erro ao buscar conta do evento:', error);
+            return res.status(404).json({
+                success: false,
+                error: "Evento não encontrado na blockchain."
+            });
+        }
+
+        // ✅ VERIFICAR PERMISSÕES ANTES DE CONTINUAR
+        const isController = eventAccount.controller.equals(userPubkey);
+        if (!isController) {
+            console.log(` ❌ Permissão negada: ${eventAccount.controller.toString()} vs ${userPubkey.toString()}`);
+            return res.status(403).json({
+                success: false,
+                error: "Você não é o criador deste evento."
+            });
+        }
+        console.log(' ✅ Permissão concedida - usuário é o controller');
+
+        // ✅ BUSCAR DADOS EM PARALELO COM TRATAMENTO DE ERRO ROBUSTO
+        console.log(' -> Buscando dados adicionais em paralelo...');
+        const [reserveBalance, metadata] = await Promise.all([
+            // ✅ BUSCAR SALDO DA RESERVA
             (async () => {
                 try {
                     const [refundReservePda] = PublicKey.findProgramAddressSync(
                         [Buffer.from("refund_reserve"), eventPubkey.toBuffer()],
                         program.programId
                     );
-                    return await connection.getBalance(refundReservePda);
+                    const balance = await connection.getBalance(refundReservePda);
+                    console.log(` ✅ Saldo da reserve: ${balance} lamports`);
+                    return balance;
                 } catch (error) {
                     console.warn(' ⚠️  Não foi possível obter saldo da reserve:', error.message);
                     return 0;
                 }
             })(),
+            
+            // ✅ BUSCAR METADADOS COM FALLBACK ROBUSTO
             (async () => {
                 try {
-                    const eventAccount = await program.account.event.fetch(eventPubkey);
-                    return await fetchMetadataOptimized(eventAccount.metadataUri);
+                    if (!eventAccount.metadataUri) {
+                        console.warn(' ⚠️  metadataUri não disponível na conta do evento');
+                        return getFallbackMetadata();
+                    }
+
+                    console.log(` -> Buscando metadados: ${eventAccount.metadataUri}`);
+                    const metadata = await fetchMetadataOptimized(eventAccount.metadataUri);
+                    
+                    if (!metadata) {
+                        console.warn(' ⚠️  fetchMetadataOptimized retornou undefined');
+                        return getFallbackMetadata();
+                    }
+
+                    console.log(' ✅ Metadados carregados com sucesso');
+                    return metadata;
                 } catch (error) {
-                    console.warn(' ⚠️  Não foi possível carregar metadados:', error.message);
-                    return {
-                        name: "Evento Sem Nome",
-                        description: "Descrição não disponível",
-                        properties: {}
-                    };
+                    console.warn(' ⚠️  Erro ao carregar metadados:', error.message);
+                    return getFallbackMetadata();
                 }
             })()
         ]);
 
-        // Verificar permissões
-        const isController = eventAccount.controller.equals(userPubkey);
-        if (!isController) {
-            return res.status(403).json({
-                success: false,
-                error: "Você não é o criador deste evento."
-            });
+        // ✅ FUNÇÃO AUXILIAR PARA METADADOS FALLBACK
+        function getFallbackMetadata() {
+            return {
+                name: "Evento Sem Nome",
+                description: "Descrição não disponível",
+                properties: {},
+                organizer: {},
+                additionalInfo: {}
+            };
         }
 
-        // Formatar dados (código mantido igual)
+        // ✅ FORMATAR DADOS COM VALIDAÇÃO
         const formatBN = (bnValue) => {
-            if (!bnValue) return 0;
-            return typeof bnValue === 'object' && bnValue.toNumber ? bnValue.toNumber() : bnValue;
+            if (!bnValue && bnValue !== 0) return 0;
+            
+            try {
+                if (typeof bnValue === 'object' && bnValue.toNumber && typeof bnValue.toNumber === 'function') {
+                    return bnValue.toNumber();
+                }
+                return Number(bnValue) || 0;
+            } catch (error) {
+                console.warn(' ❌ Erro ao formatar BN:', error.message);
+                return 0;
+            }
         };
 
-        const formattedTiers = (eventAccount.tiers || []).map(tier => ({
-            name: tier.name || 'Sem nome',
-            priceBrlCents: formatBN(tier.priceBrlCents),
-            maxTicketsSupply: formatBN(tier.maxTicketsSupply),
-            ticketsSold: formatBN(tier.ticketsSold) || 0
-        }));
+        // ✅ PROCESSAR TIERS COM VALIDAÇÃO
+        const formattedTiers = (eventAccount.tiers || []).map((tier, index) => {
+            const name = tier.name || `Tier ${index + 1}`;
+            const priceBrlCents = formatBN(tier.priceBrlCents);
+            const maxTicketsSupply = formatBN(tier.maxTicketsSupply);
+            const ticketsSold = formatBN(tier.ticketsSold);
 
-        const formattedValidators = (eventAccount.validators || []).map(validator =>
-            validator.toString ? validator.toString() : String(validator)
-        );
+            console.log(`   Tier ${index}: "${name}" - ${ticketsSold}/${maxTicketsSupply} - R$ ${(priceBrlCents / 100).toFixed(2)}`);
 
+            return {
+                name: name,
+                priceBrlCents: priceBrlCents,
+                priceBrl: (priceBrlCents / 100).toFixed(2),
+                maxTicketsSupply: maxTicketsSupply,
+                ticketsSold: ticketsSold,
+                ticketsRemaining: maxTicketsSupply - ticketsSold,
+                isSoldOut: maxTicketsSupply - ticketsSold <= 0
+            };
+        });
+
+        // ✅ CALCULAR TOTAIS DE TICKETS
+        const totalTicketsSold = formattedTiers.reduce((sum, tier) => sum + tier.ticketsSold, 0);
+        const maxTotalSupply = formattedTiers.reduce((sum, tier) => sum + tier.maxTicketsSupply, 0);
+
+        // ✅ PROCESSAR VALIDADORES
+        const formattedValidators = (eventAccount.validators || []).map(validator => {
+            try {
+                return validator.toString ? validator.toString() : String(validator);
+            } catch (error) {
+                console.warn(' ❌ Erro ao formatar validador:', error);
+                return 'Invalid Validator';
+            }
+        });
+
+        // ✅ ESTRUTURA FINAL DOS DADOS
         const eventData = {
             publicKey: eventAddress,
             account: {
@@ -1704,7 +2212,8 @@ export const getEventForManagement = async (req, res) => {
                 state: formatBN(eventAccount.state) || 0,
                 salesStartDate: formatBN(eventAccount.salesStartDate),
                 salesEndDate: formatBN(eventAccount.salesEndDate),
-                totalTicketsSold: formatBN(eventAccount.totalTicketsSold) || 0,
+                totalTicketsSold: totalTicketsSold,
+                maxTotalSupply: maxTotalSupply,
                 tiers: formattedTiers,
                 maxTicketsPerWallet: formatBN(eventAccount.maxTicketsPerWallet) || 1,
                 resaleAllowed: Boolean(eventAccount.resaleAllowed),
@@ -1719,109 +2228,78 @@ export const getEventForManagement = async (req, res) => {
             isController: true
         };
 
-        console.log(`[✔] Evento preparado para gestão em ${Date.now() - startTime}ms: ${metadata.name}`);
+        const duration = Date.now() - startTime;
+        
+        // ✅ LOG SEGURO - NUNCA ACESSA PROPRIEDADES DE UNDEFINED
+        const eventName = metadata?.name || 'Evento Sem Nome';
+        console.log(`[✔] Evento preparado para gestão em ${duration}ms: ${eventName}`);
+        console.log(` 📊 Estatísticas: ${totalTicketsSold}/${maxTotalSupply} ingressos, ${formattedTiers.length} tiers`);
 
         res.status(200).json({
             success: true,
-            event: eventData
+            event: eventData,
+            performance: {
+                duration: duration,
+                tiersCount: formattedTiers.length,
+                validatorsCount: formattedValidators.length
+            }
         });
 
     } catch (error) {
         console.error("❌ Erro ao buscar evento para gestão:", error);
 
-        if (error.message?.includes('Account does not exist')) {
+        // ✅ DETECTAR TIPOS ESPECÍFICOS DE ERRO
+        if (error.message?.includes('Account does not exist') || 
+            error.message?.includes('could not find account')) {
             return res.status(404).json({
                 success: false,
                 error: "Evento não encontrado na blockchain."
             });
         }
 
+        if (error.message?.includes('Invalid public key')) {
+            return res.status(400).json({
+                success: false,
+                error: "Endereço do evento inválido."
+            });
+        }
+
         res.status(500).json({
             success: false,
-            error: "Erro interno do servidor.",
+            error: "Erro interno do servidor ao buscar dados do evento.",
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 }; const metadataCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
-// Função auxiliar para fetch com timeout e retry
-const fetchWithTimeoutAndRetry = async (url, timeout = 5000, retries = 2) => {
-    for (let i = 0; i <= retries; i++) {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-            const response = await fetch(url, {
-                signal: controller.signal,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (compatible; EventApp/1.0)'
-                }
-            });
-
-            clearTimeout(timeoutId);
-
-            if (response.ok) {
-                return await response.json();
-            }
-        } catch (error) {
-            if (i === retries) throw error;
-            // Espera um pouco antes de tentar novamente
-            await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+const fetchMetadataOptimizedSafe = async (uri) => {
+    try {
+        const metadata = await fetchMetadataOptimized(uri);
+        
+        if (!metadata) {
+            console.warn(' ⚠️  fetchMetadataOptimized retornou undefined/null');
+            return {
+                name: "Evento Sem Nome",
+                description: "Descrição não disponível",
+                properties: {},
+                organizer: {},
+                additionalInfo: {}
+            };
         }
+        
+        return metadata;
+    } catch (error) {
+        console.warn(' ⚠️  fetchMetadataOptimizedSafe - Erro:', error.message);
+        return {
+            name: "Evento Sem Nome",
+            description: "Descrição não disponível",
+            properties: {},
+            organizer: {},
+            additionalInfo: {}
+        };
     }
-};
-
-// Função otimizada para buscar metadados
-const fetchMetadataOptimized = async (uri) => {
-    if (!uri) return null;
-
-    // Verificar cache primeiro
-    const cached = metadataCache.get(uri);
-    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-        console.log(` -> Cache hit para: ${uri}`);
-        return cached.data;
-    }
-
-    const gateways = [
-        // Gateways públicos rápidos primeiro
-        uri.replace('https://gateway.pinata.cloud/ipfs/', 'https://ipfs.io/ipfs/'),
-        uri.replace('https://gateway.pinata.cloud/ipfs/', 'https://cloudflare-ipfs.com/ipfs/'),
-        uri.replace('https://gateway.pinata.cloud/ipfs/', 'https://dweb.link/ipfs/'),
-        uri.replace('https://gateway.pinata.cloud/ipfs/', 'https://gateway.ipfs.io/ipfs/'),
-        // Gateway original por último
-        uri
-    ];
-
-    // Tentar todos os gateways em paralelo e pegar o primeiro que responder
-    const promises = gateways.map(async (gateway) => {
-        try {
-            const metadata = await fetchWithTimeoutAndRetry(gateway, 3000, 1);
-            console.log(` -> Sucesso via: ${new URL(gateway).hostname}`);
-
-            // Armazenar no cache
-            metadataCache.set(uri, {
-                data: metadata,
-                timestamp: Date.now()
-            });
-
-            return metadata;
-        } catch (error) {
-            return null;
-        }
-    });
-
-    // Esperar pelo primeiro sucesso
-    const results = await Promise.allSettled(promises);
-    const successfulResult = results.find(result =>
-        result.status === 'fulfilled' && result.value !== null
-    );
-
-    if (successfulResult) {
-        return successfulResult.value;
-    }
-
-    throw new Error(`Todos os gateways falharam para: ${uri}`);
 };
 
 // Buscar múltiplos metadados em paralelo com limite de concorrência
@@ -1866,51 +2344,51 @@ const fetchMultipleMetadata = async (events, concurrencyLimit = 5) => {
 
     return results;
 };
-export const getActiveEvents = async (req, res) => {
-    console.log('[+] Fetching active events (OTIMIZADO)...');
-    const startTime = Date.now();
+    export const getActiveEvents = async (req, res) => {
+        console.log('[+] Fetching active events (OTIMIZADO)...');
+        const startTime = Date.now();
 
-    try {
-        // Buscar eventos on-chain (mantém igual)
-        const allEvents = await program.account.event.all();
-        console.log(` -> Found ${allEvents.length} total events on-chain (${Date.now() - startTime}ms)`);
+        try {
+            // Buscar eventos on-chain (mantém igual)
+            const allEvents = await program.account.event.all();
+            console.log(` -> Found ${allEvents.length} total events on-chain (${Date.now() - startTime}ms)`);
 
-        const nowInSeconds = Math.floor(Date.now() / 1000);
+            const nowInSeconds = Math.floor(Date.now() / 1000);
 
-        // Filtrar eventos ativos
-        const fullyActiveEvents = allEvents.filter(event => {
-            const acc = event.account;
-            const isStateActive = acc.state === 1;
-            const isNotCanceled = !acc.canceled;
-            const isInSalesPeriod = nowInSeconds >= acc.salesStartDate.toNumber() &&
-                nowInSeconds <= acc.salesEndDate.toNumber();
+            // Filtrar eventos ativos
+            const fullyActiveEvents = allEvents.filter(event => {
+                const acc = event.account;
+                const isStateActive = acc.state === 1;
+                const isNotCanceled = !acc.canceled;
+                const isInSalesPeriod = nowInSeconds >= acc.salesStartDate.toNumber() &&
+                    nowInSeconds <= acc.salesEndDate.toNumber();
 
-            return isStateActive && isNotCanceled && isInSalesPeriod;
-        });
+                return isStateActive && isNotCanceled && isInSalesPeriod;
+            });
 
-        console.log(` -> Found ${fullyActiveEvents.length} active events (${Date.now() - startTime}ms)`);
+            console.log(` -> Found ${fullyActiveEvents.length} active events (${Date.now() - startTime}ms)`);
 
-        // Buscar metadados em paralelo com concorrência controlada
-        console.log(' -> Fetching metadata in parallel...');
-        const eventsWithMetadata = await fetchMultipleMetadata(fullyActiveEvents, 6);
+            // Buscar metadados em paralelo com concorrência controlada
+            console.log(' -> Fetching metadata in parallel...');
+            const eventsWithMetadata = await fetchMultipleMetadata(fullyActiveEvents, 6);
 
-        // Ordenar por data de início
-        const validEvents = eventsWithMetadata
-            .sort((a, b) => a.account.salesStartDate.toNumber() - b.account.salesStartDate.toNumber());
+            // Ordenar por data de início
+            const validEvents = eventsWithMetadata
+                .sort((a, b) => a.account.salesStartDate.toNumber() - b.account.salesStartDate.toNumber());
 
-        const totalTime = Date.now() - startTime;
-        console.log(`[✔] Successfully processed ${validEvents.length} active events in ${totalTime}ms`);
+            const totalTime = Date.now() - startTime;
+            console.log(`[✔] Successfully processed ${validEvents.length} active events in ${totalTime}ms`);
 
-        res.status(200).json(validEvents);
+            res.status(200).json(validEvents);
 
-    } catch (error) {
-        console.error("[✘] Error fetching active events:", error);
-        res.status(500).json({
-            error: "Server error fetching events.",
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
-};
+        } catch (error) {
+            console.error("[✘] Error fetching active events:", error);
+            res.status(500).json({
+                error: "Server error fetching events.",
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            });
+        }
+    };
 
 export const getEventDetails = async (req, res) => {
     const { eventAddress } = req.params;
@@ -1918,46 +2396,151 @@ export const getEventDetails = async (req, res) => {
         return res.status(400).json({ success: false, error: 'O endereço do evento é obrigatório.' });
     }
 
-    console.log(`[+] Buscando detalhes para o evento: ${eventAddress}`);
+    console.log(`\n🎯 [DETALHES EVENTO] Iniciando busca: ${eventAddress}`);
     const startTime = Date.now();
 
     try {
         const eventPubkey = new PublicKey(eventAddress);
 
-        // Buscar dados on-chain e metadados em paralelo
-        const [account, metadata] = await Promise.all([
-            program.account.event.fetch(eventPubkey),
-            (async () => {
-                try {
-                    // Buscar metadados primeiro para não esperar desnecessariamente
-                    return await fetchMetadataOptimized(account.metadataUri);
-                } catch (error) {
-                    console.warn(' -> Falha nos metadados, usando padrão:', error.message);
-                    return {
-                        name: "Evento Sem Nome",
-                        description: "Descrição não disponível",
-                        image: "",
-                        properties: {}
-                    };
-                }
-            })()
-        ]);
+        // ✅ PRIMEIRO: Buscar dados on-chain
+        console.log('📡 Buscando dados on-chain da blockchain...');
+        const account = await program.account.event.fetch(eventPubkey);
+        
+        console.log('✅ DADOS ON-CHAIN CARREGADOS:');
+        console.log('   - Event ID:', account.event_id?.toString());
+        console.log('   - Controller:', account.controller?.toString());
+        console.log('   - Canceled:', account.canceled);
+        console.log('   - State:', account.state);
+        console.log('   - Total Tickets Sold:', account.total_tickets_sold?.toString());
+        console.log('   - Sales Start:', new Date(account.sales_start_date * 1000).toISOString());
+        console.log('   - Sales End:', new Date(account.sales_end_date * 1000).toISOString());
+        console.log('   - Tiers Count:', account.tiers?.length);
 
-        console.log(` -> Dados carregados em ${Date.now() - startTime}ms`);
+        // ✅ LOG DETALHADO DOS TIERS
+        console.log('🎫 DETALHES DOS TIERS:');
+        if (account.tiers && account.tiers.length > 0) {
+            account.tiers.forEach((tier, index) => {
+                console.log(`   Tier ${index}:`);
+                console.log(`     - Nome: "${tier.name}"`);
+                console.log(`     - Preço: ${tier.price_brl_cents} centavos`);
+                console.log(`     - Max Supply: ${tier.max_tickets_supply}`);
+                console.log(`     - Sold: ${tier.tickets_sold}`);
+                console.log(`     - Disponível: ${tier.max_tickets_supply - tier.tickets_sold}`);
+            });
+        } else {
+            console.log('   ⚠️  Nenhum tier encontrado');
+        }
 
-        res.status(200).json({
-            success: true,
-            event: {
-                account: account,
-                metadata: metadata,
-            },
+        // ✅ SEGUNDO: Buscar metadados off-chain
+        let metadata = {};
+        if (account.metadata_uri) {
+            try {
+                console.log('🌐 Buscando metadados off-chain...');
+                console.log('   - Metadata URI:', account.metadata_uri);
+                metadata = await fetchMetadataOptimized(account.metadata_uri);
+                console.log('✅ Metadados carregados:', {
+                    name: metadata.name,
+                    hasImage: !!metadata.image,
+                    hasProperties: !!metadata.properties
+                });
+            } catch (error) {
+                console.warn('❌ Falha nos metadados:', error.message);
+                metadata = {
+                    name: "Evento Sem Nome",
+                    description: "Descrição não disponível",
+                    image: "",
+                    properties: {}
+                };
+            }
+        } else {
+            console.warn('⚠️  Nenhum metadata_uri encontrado na account');
+        }
+
+        // ✅ TERCEIRO: Processar tiers para calcular totais
+        console.log('🧮 Calculando estatísticas de ingressos...');
+        let totalSupply = 0;
+        let totalSoldFromTiers = 0;
+        
+        const processedTiers = account.tiers.map((tier, index) => {
+            const maxSupply = tier.max_tickets_supply || 0;
+            const sold = tier.tickets_sold || 0;
+            
+            totalSupply += maxSupply;
+            totalSoldFromTiers += sold;
+
+            return {
+                name: tier.name || `Tier ${index + 1}`,
+                priceBrlCents: tier.price_brl_cents || 0,
+                maxTicketsSupply: maxSupply,
+                ticketsSold: sold,
+                ticketsRemaining: maxSupply - sold,
+                isSoldOut: sold >= maxSupply
+            };
         });
 
+        // ✅ QUARTO: Validar consistência dos dados
+        const totalSoldFromAccount = account.total_tickets_sold || 0;
+        
+        // Prioridade: usar total da account, fallback para soma dos tiers
+        const totalSold = totalSoldFromAccount > 0 ? totalSoldFromAccount : totalSoldFromTiers;
+
+        console.log('📊 RESUMO FINAL:');
+        console.log('   - Total Supply (soma tiers):', totalSupply);
+        console.log('   - Total Sold (account):', totalSoldFromAccount);
+        console.log('   - Total Sold (soma tiers):', totalSoldFromTiers);
+        console.log('   - Total Sold (final):', totalSold);
+        console.log('   - Progresso:', totalSupply > 0 ? ((totalSold / totalSupply) * 100).toFixed(2) + '%' : '0%');
+        console.log('   - Tiers processados:', processedTiers.length);
+
+        const duration = Date.now() - startTime;
+        console.log(`✅ [DETALHES EVENTO] Concluído em ${duration}ms\n`);
+
+        // ✅ ESTRUTURA DA RESPOSTA
+        const responseData = {
+            success: true,
+            event: {
+                publicKey: eventAddress,
+                account: {
+                    // Dados on-chain originais
+                    eventId: account.event_id,
+                    controller: account.controller.toString(),
+                    canceled: account.canceled,
+                    state: account.state,
+                    salesStartDate: account.sales_start_date,
+                    salesEndDate: account.sales_end_date,
+                    totalTicketsSold: totalSold, // ✅ VALOR CORRETO
+                    tiers: processedTiers, // ✅ TIERS PROCESSADOS
+                    maxTicketsPerWallet: account.max_tickets_per_wallet,
+                    resaleAllowed: account.resale_allowed,
+                    transferFeeBps: account.transfer_fee_bps,
+                    royaltyBps: account.royalty_bps,
+                    metadataUri: account.metadata_uri,
+                    refundReserve: account.refund_reserve.toString(),
+                    validators: account.validators.map(v => v.toString()),
+                    
+                    // Dados calculados
+                    maxTotalSupply: totalSupply,
+                },
+                metadata: metadata,
+                stats: {
+                    totalSupply,
+                    totalSold,
+                    progress: totalSupply > 0 ? (totalSold / totalSupply) * 100 : 0,
+                    tiersCount: processedTiers.length,
+                    soldOutTiers: processedTiers.filter(t => t.isSoldOut).length
+                }
+            },
+        };
+
+        console.log('📤 Enviando resposta para frontend...');
+        res.status(200).json(responseData);
+
     } catch (error) {
-        console.error("[✘] Erro ao buscar detalhes do evento:", error);
+        console.error("\n❌ [DETALHES EVENTO] Erro crítico:", error);
 
         if (error.message.includes('Account does not exist') ||
             error.message.includes('could not find account')) {
+            console.log('⚠️  Evento não encontrado na blockchain');
             return res.status(404).json({
                 success: false,
                 error: 'Evento não encontrado na blockchain.'
@@ -1965,12 +2548,14 @@ export const getEventDetails = async (req, res) => {
         }
 
         if (error.message.includes('Invalid public key')) {
+            console.log('⚠️  Public key inválida');
             return res.status(400).json({
                 success: false,
                 error: 'O endereço do evento fornecido é inválido.'
             });
         }
 
+        console.error('💥 Erro interno do servidor:', error.message);
         res.status(500).json({
             success: false,
             error: 'Ocorreu um erro no servidor ao buscar os dados do evento.',

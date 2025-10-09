@@ -8,14 +8,31 @@ export function TicketEmail({
   eventLocation, 
   eventImage,
   organizerName,
-  organizerLogo,
-  eventDescription 
+  organizerLogo
 }) {
-  const formattedDate = new Date(eventDate).toLocaleString('pt-BR', {
-    dateStyle: 'full',
-    timeStyle: 'short',
-    timeZone: 'America/Sao_Paulo',
-  });
+  // ✅ CORREÇÃO CRÍTICA: Formatação segura da data
+  const formatDateSafely = (dateString) => {
+    if (!dateString || dateString === "Data a ser definida") {
+      return "Data a ser definida";
+    }
+    
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) {
+        return "Data a ser definida";
+      }
+      
+      return date.toLocaleString('pt-BR', {
+        dateStyle: 'full',
+        timeStyle: 'short',
+        timeZone: 'America/Sao_Paulo',
+      });
+    } catch (error) {
+      return "Data a ser definida";
+    }
+  };
+
+  const formattedDate = formatDateSafely(eventDate);
 
   return (
     <Html>
@@ -38,11 +55,11 @@ export function TicketEmail({
             <Heading style={h1}>SEU INGRESSO CHEGOU! 🎉</Heading>
             
             <Text style={text}>
-              Olá, <strong style={highlight}>{userName}</strong>!! 
+              Olá, <strong style={highlight}>{userName}</strong>!
             </Text>
             
             <Text style={text}>
-              Você garantiu seu lugar no <strong>{eventName}</strong>
+              Você garantiu seu lugar no <strong style={highlight}>{eventName}</strong>
             </Text>
 
             {/* DETALHES DO EVENTO */}
@@ -53,11 +70,12 @@ export function TicketEmail({
               <Hr style={hr} />
               
               <Text style={detailLabel}>📍 LOCAL</Text>
-              <Text style={detailValue}>{eventLocation.replace(/\n/g, ', ')}</Text>
+              {/* ✅ CORREÇÃO CRÍTICA: Manter quebras de linha */}
+              <Text style={{...detailValue, whiteSpace: 'pre-line'}}>{eventLocation}</Text>
             </Section>
 
             {/* ORGANIZADOR */}
-            {organizerName && (
+            {organizerName && organizerName !== "Organizador" && (
               <Section style={organizerSection}>
                 <Text style={organizerLabel}>Realização:</Text>
                 <Section style={organizerContainer}>

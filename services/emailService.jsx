@@ -110,7 +110,7 @@ export async function sendTicketEmail(userData, ticketData) {
         // 3. Enviar e-mail com o PDF anexado
         console.log(`🚀 Enviando e-mail para: ${userEmail}`);
         
-        const fromAddress = 'Ticketfy <onboarding@resend.dev>';
+        const fromAddress = 'Ticketfy <ingressos@ticketfy.link>';
         
         const { data, error } = await resend.emails.send({
             from: fromAddress,

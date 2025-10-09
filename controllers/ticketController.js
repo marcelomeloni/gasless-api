@@ -565,9 +565,8 @@ async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, m
 
     try {
         console.log(`📧 Preparando email para: ${email} (${name})`);
-        console.log(`📍 Event Address: ${eventAddress}`);
         
-        // ✅ BUSCAR METADADOS COM VALIDAÇÃO
+        // ✅ BUSCAR METADADOS 
         const eventData = await getEventMetadataForEmail(eventAddress);
         
         if (!eventData) {
@@ -578,84 +577,63 @@ async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, m
         const { 
             eventName, 
             eventDate, 
-            eventLocation, 
+            eventLocation,  // ✅ JÁ DEVE VIR FORMATADO COMO STRING
             eventImage, 
             organizerName, 
             organizerLogo 
         } = eventData;
 
-        // ✅ VALIDAÇÃO E CORREÇÃO DOS DADOS
-        const safeEventName = eventName && eventName !== "Evento" ? eventName : "Evento Especial";
-        
-        let safeEventDate = "Data a ser definida";
-        if (eventDate && eventDate !== "Data a ser definida") {
-            try {
-                const dateObj = new Date(eventDate);
-                if (!isNaN(dateObj.getTime())) {
-                    // ✅ FORMATAR DATA CORRETAMENTE
-                    safeEventDate = dateObj.toLocaleDateString('pt-BR', {
-                        day: '2-digit',
-                        month: '2-digit', 
-                        year: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    });
-                }
-            } catch (dateError) {
-                console.warn('❌ Data inválida, usando padrão:', dateError);
-            }
+        // ✅ VALIDAÇÃO FINAL - GARANTIR QUE eventLocation É STRING
+        let safeEventLocation;
+        if (typeof eventLocation === 'string') {
+            safeEventLocation = eventLocation;
+        } else if (eventLocation && typeof eventLocation === 'object') {
+            // ✅ SE FOR OBJETO, FORMATA PARA STRING (CONSISTÊNCIA)
+            safeEventLocation = formatEventLocation(eventLocation);
+        } else {
+            safeEventLocation = "Local a ser definido";
         }
 
-        const safeEventLocation = eventLocation && eventLocation !== "Local a ser definido" 
-            ? eventLocation 
-            : "Local a ser definido";
-
-        const safeOrganizerName = organizerName && organizerName !== "Organizador" 
-            ? organizerName 
-            : "Organizador";
-
-        // ✅ ESTRUTURA DE DADOS CORRETA PARA O EMAIL
+        // ✅ ESTRUTURA DE DADOS CONSISTENTE
         const ticketDataForEmail = {
-            // ✅ DADOS DO EVENTO (VALIDADOS)
-            eventName: safeEventName,
-            eventDate: safeEventDate,
-            eventLocation: safeEventLocation,
+            // ✅ DADOS DO EVENTO - EMAIL ESPERA STRINGS
+            eventName: eventName || "Evento Especial",
+            eventDate: eventDate || "Data a ser definida",
+            eventLocation: safeEventLocation, // ✅ SEMPRE STRING
             eventImage: eventImage || '',
-            organizerName: safeOrganizerName,
+            organizerName: organizerName || "Organizador",
             organizerLogo: organizerLogo || '',
             
             // ✅ DADOS DO TICKET
             mintAddress: mintAddress,
             registrationId: registrationId,
             
-            // ✅ DADOS DA CARTEIRA (APENAS PARA NOVOS USUÁRIOS)
+            // ✅ DADOS DA CARTEIRA
             ...(mnemonic && { seedPhrase: mnemonic }),
             ...(privateKey && { privateKey: privateKey }),
-            
-            // ✅ DADOS DE PAGAMENTO (APENAS PARA INGRESSOS PAGOS)
-            ...(isPaid && { 
-                isPaid: true,
-                paymentAmount: priceBRLCents ? (priceBRLCents / 100).toFixed(2) : "0.00"
-            })
         };
 
-        console.log('🎯 DADOS FINAIS PARA EMAIL (VALIDADOS):', {
-            eventName: ticketDataForEmail.eventName,
-            eventDate: ticketDataForEmail.eventDate,
-            eventLocation: ticketDataForEmail.eventLocation,
-            hasImage: !!ticketDataForEmail.eventImage,
-            organizerName: ticketDataForEmail.organizerName,
-            hasOrganizerLogo: !!ticketDataForEmail.organizerLogo,
-            isPaid: ticketDataForEmail.isPaid || false,
-            paymentAmount: ticketDataForEmail.paymentAmount || 'N/A'
+        // ✅ DADOS PARA PDF - PODE RECEBER OBJETO OU STRING
+        const ticketDataForPDF = {
+            ...ticketDataForEmail,
+            eventLocation: eventLocation, // ✅ MANTÉM O ORIGINAL (OBJETO OU STRING)
+        };
+
+        console.log('🎯 DADOS FINAIS VALIDADOS:', {
+            // Email data
+            emailEventName: ticketDataForEmail.eventName,
+            emailEventLocation: ticketDataForEmail.eventLocation.substring(0, 100) + '...',
+            // PDF data  
+            pdfEventLocationType: typeof ticketDataForPDF.eventLocation,
+            hasImage: !!eventImage
         });
 
-        // ✅ ENVIO DO EMAIL
+        // ✅ ENVIO DO EMAIL COM DADOS CORRETOS
         console.log(`📤 Enviando email para: ${email}`);
         const emailResult = await sendTicketEmail({ 
             name: name || "Participante", 
             email: email 
-        }, ticketDataForEmail);
+        }, ticketDataForEmail, ticketDataForPDF); // ✅ PASSA AMBAS AS VERSÕES
         
         if (!emailResult.success) {
             console.error("❌ Falha no envio de e-mail:", emailResult.error);

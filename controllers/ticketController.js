@@ -375,34 +375,23 @@ async function getEventMetadataForEmail(eventAddress) {
         if (!dbError && dbEvent) {
             console.log('✅ Evento encontrado no Supabase');
             
-            // SEMPRE usar metadados do Supabase se existirem
             if (dbEvent.metadata) {
                 eventMetadata = dbEvent.metadata;
-                eventImage = dbEvent.image_url || eventMetadata.image || '';
+                eventImage = await optimizeIpfsUrl(dbEvent.image_url || eventMetadata.image || '');
                 eventName = eventMetadata.name || dbEvent.event_name || "Evento";
                 
-                // ✅ ACESSO SEGURO À DATA - CORRIGIDO
+                // ✅ ACESSO SEGURO À DATA
                 eventDate = eventMetadata.properties?.dateTime?.start || 
                            eventMetadata.startDate || 
                            "Data a ser definida";
                 
-                // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
-                if (eventMetadata.properties?.location) {
-                    eventLocation = formatEventLocation(eventMetadata.properties.location);
-                } else if (eventMetadata.location) {
-                    eventLocation = formatEventLocation(eventMetadata.location);
-                } else {
-                    eventLocation = "Local a ser definido";
-                }
+                // ✅ ACESSO SEGURO AO LOCAL
+                eventLocation = formatEventLocation(eventMetadata.properties?.location || eventMetadata.location);
                 
                 organizerName = eventMetadata.organizer?.name || "Organizador";
-                organizerLogo = eventMetadata.organizer?.organizerLogo || '';
+                organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
                 
-                console.log('✅ Metadados carregados do Supabase:', { 
-                    eventName, 
-                    eventDate,
-                    eventLocation: eventLocation.substring(0, 50) + '...' 
-                });
+                console.log('✅ Metadados carregados do Supabase');
             } else {
                 console.log('🔄 Evento no Supabase sem metadados, buscando da blockchain...');
                 await fetchFromBlockchain();
@@ -425,8 +414,7 @@ async function getEventMetadataForEmail(eventAddress) {
         eventName, 
         eventDate, 
         eventLocation: eventLocation.substring(0, 100),
-        hasImage: !!eventImage,
-        hasOrganizerLogo: !!organizerLogo 
+        hasImage: !!eventImage
     });
     
     return { eventMetadata, eventImage, eventName, eventDate, eventLocation, organizerName, organizerLogo };
@@ -440,32 +428,28 @@ async function getEventMetadataForEmail(eventAddress) {
             if (eventAccount.metadataUri) {
                 console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
                 
-                const metadataResponse = await fetch(eventAccount.metadataUri);
+                const optimizedUri = await optimizeIpfsUrl(eventAccount.metadataUri);
+                const metadataResponse = await fetch(optimizedUri);
+                
                 if (metadataResponse.ok) {
                     eventMetadata = await metadataResponse.json();
                     
-                    // Processar URLs de imagem com gateways
+                    // Processar URLs com gateways otimizados
                     eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
                     eventName = eventMetadata.name || eventAccount.name || "Evento";
                     
-                    // ✅ ACESSO SEGURO À DATA - CORRIGIDO
+                    // ✅ ACESSO SEGURO À DATA
                     eventDate = eventMetadata.properties?.dateTime?.start || 
                                eventMetadata.startDate || 
                                "Data a ser definida";
                     
-                    // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
-                    if (eventMetadata.properties?.location) {
-                        eventLocation = formatEventLocation(eventMetadata.properties.location);
-                    } else if (eventMetadata.location) {
-                        eventLocation = formatEventLocation(eventMetadata.location);
-                    } else {
-                        eventLocation = "Local a ser definido";
-                    }
+                    // ✅ ACESSO SEGURO AO LOCAL
+                    eventLocation = formatEventLocation(eventMetadata.properties?.location || eventMetadata.location);
                     
                     organizerName = eventMetadata.organizer?.name || "Organizador";
                     organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
                     
-                    console.log('✅ Metadados carregados do IPFS:', eventName);
+                    console.log('✅ Metadados carregados do IPFS otimizado');
                 }
             } else {
                 console.warn('⚠️ Evento não tem metadataUri na blockchain');
@@ -500,21 +484,16 @@ function formatEventLocation(location) {
             // Monta o endereço completo
             const addressParts = [];
             
-            // Primeira linha: Venue Name (mais importante)
             if (venue) addressParts.push(venue);
             
-            // Segunda linha: Rua, Número
             const streetLine = [street, number].filter(Boolean).join(', ');
             if (streetLine) addressParts.push(streetLine);
             
-            // Terceira linha: Bairro
             if (neighborhood) addressParts.push(neighborhood);
             
-            // Quarta linha: Cidade - Estado
             const cityLine = [city, state].filter(Boolean).join(' - ');
             if (cityLine) addressParts.push(cityLine);
             
-            // Quinta linha: CEP
             if (address.zipCode) addressParts.push(`CEP: ${address.zipCode}`);
             
             return addressParts.join('\n');
@@ -525,39 +504,56 @@ function formatEventLocation(location) {
 
     return "Local a ser definido";
 }
-// Função para otimizar URLs IPFS (mantenha a que você já tem)
+const IPFS_GATEWAYS = [
+    'https://ipfs.io/ipfs/',
+    'https://cloudflare-ipfs.com/ipfs/',
+    'https://red-obedient-stingray-854.mypinata.cloud/ipfs/',
+    'https://gateway.pinata.cloud/ipfs/',
+    'https://dweb.link/ipfs/'
+];
+
+// ✅ FUNÇÃO MELHORADA PARA OTIMIZAR URLS IPFS
 async function optimizeIpfsUrl(ipfsUrl) {
     if (!ipfsUrl || !ipfsUrl.includes('ipfs')) return ipfsUrl;
     
-    const gateways = [
-        'https://red-obedient-stingray-854.mypinata.cloud/ipfs/',
-        'https://ipfs.io/ipfs/',
-        'https://gateway.pinata.cloud/ipfs/'
-    ];
-    
     // Extrair CID da URL
-    const cidMatch = ipfsUrl.match(/ipfs\/([a-zA-Z0-9]+)/);
+    const cidMatch = ipfsUrl.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[A-Za-z2-7]{58})/);
     if (!cidMatch) return ipfsUrl;
     
-    const cid = cidMatch[1];
+    const cid = cidMatch[0];
     console.log(`   🔄 Otimizando URL IPFS: ${cid}`);
     
-    // Testar gateways em ordem de preferência
-    for (const gateway of gateways) {
+    // Testar gateways em paralelo para maior velocidade
+    const gatewayTests = IPFS_GATEWAYS.map(async (gateway) => {
         try {
-            const testUrl = gateway + cid;
-            const response = await fetch(testUrl, { method: 'HEAD' });
+            const testUrl = `${gateway}${cid}`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
+            
+            const response = await fetch(testUrl, { 
+                method: 'HEAD',
+                signal: controller.signal 
+            });
+            
+            clearTimeout(timeoutId);
+            
             if (response.ok) {
-                console.log(`   ✅ Gateway rápido: ${gateway}`);
+                console.log(`   ✅ Gateway rápido encontrado: ${gateway}`);
                 return testUrl;
             }
         } catch (error) {
-            // Continuar para o próximo gateway
+            // Silenciosamente continuar para o próximo gateway
+            return null;
         }
+    });
+
+    try {
+        const results = await Promise.all(gatewayTests);
+        const workingUrl = results.find(url => url !== null);
+        return workingUrl || ipfsUrl;
+    } catch (error) {
+        return ipfsUrl;
     }
-    
-    // Se nenhum gateway funcionar, retornar a URL original
-    return ipfsUrl;
 }
 // Função auxiliar para enviar email
 // ✅ VERSÃO FINAL DEFINITIVA - Envio seguro de email
@@ -573,7 +569,7 @@ async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, m
         // ✅ BUSCAR METADADOS PRIMEIRO
         const { eventName, eventDate, eventLocation, eventImage, organizerName, organizerLogo } = await getEventMetadataForEmail(eventAddress);
 
-        // ✅ VALIDAR DATA - CORREÇÃO CRÍTICA
+        // ✅ VALIDAR DATA
         let safeEventDate = "Data a ser definida";
         if (eventDate && eventDate !== "Data a ser definida") {
             try {
@@ -609,8 +605,7 @@ async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, m
             eventName: ticketDataForEmail.eventName,
             eventDate: ticketDataForEmail.eventDate,
             eventLocation: ticketDataForEmail.eventLocation.substring(0, 50) + '...',
-            hasImage: !!ticketDataForEmail.eventImage,
-            hasOrganizerLogo: !!ticketDataForEmail.organizerLogo
+            hasImage: !!ticketDataForEmail.eventImage
         });
 
         const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);

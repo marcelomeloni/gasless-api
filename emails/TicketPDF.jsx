@@ -309,13 +309,22 @@ export const TicketPDF = ({ ticketData, qrCodeImage, brandLogoImage }) => {
 
   const formatFullAddress = (location) => {
     if (!location || location.type !== 'Physical' || !location.address) { 
-      return "Local a definir"; 
+        return "Local a definir"; 
     }
+    
     const { venueName, address } = location;
-    const line1 = `${address.street}${address.number ? `, ${address.number}` : ''}`;
-    const line2 = `${address.neighborhood ? `${address.neighborhood}, ` : ''}${address.city} - ${address.state}`;
-    return `${venueName}\n${line1}\n${line2}`;
-  };
+    const streetLine = `${address.street}${address.number ? `, ${address.number}` : ''}`;
+    const cityLine = `${address.city} - ${address.state}`;
+    
+    const lines = [];
+    if (venueName) lines.push(venueName);
+    if (streetLine) lines.push(streetLine);
+    if (address.neighborhood) lines.push(address.neighborhood);
+    if (cityLine) lines.push(cityLine);
+    if (address.zipCode) lines.push(`CEP: ${address.zipCode}`);
+    
+    return lines.join('\n');
+};
 
   const formatDisplayDate = (dateString) => {
     if (!dateString) return 'Data a definir';

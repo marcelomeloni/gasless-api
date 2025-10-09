@@ -352,6 +352,7 @@ export const generateWalletAndMintPaid = async (req, res) => {
         });
     }
 };
+// Função auxiliar para buscar metadados do evento com múltiplos fallbacks
 async function getEventMetadataForEmail(eventAddress) {
     let eventMetadata = {};
     let eventImage = '';
@@ -359,6 +360,16 @@ async function getEventMetadataForEmail(eventAddress) {
     let eventDate = "Data a ser definida";
     let eventLocation = "Local a ser definido";
     let organizerName = "Organizador";
+    let organizerLogo = '';
+
+    // Lista de gateways IPFS com prioridade
+    const ipfsGateways = [
+        'https://red-obedient-stingray-854.mypinata.cloud/ipfs/',
+        'https://ipfs.io/ipfs/',
+        'https://gateway.pinata.cloud/ipfs/',
+        'https://cloudflare-ipfs.com/ipfs/',
+        'https://dweb.link/ipfs/'
+    ];
 
     try {
         console.log(`🔍 Buscando metadados para evento: ${eventAddress}`);
@@ -371,7 +382,7 @@ async function getEventMetadataForEmail(eventAddress) {
             .single();
 
         if (!dbError && dbEvent) {
-            console.log('✅ Metadados carregados do Supabase:', dbEvent.metadata ? 'com metadata' : 'sem metadata');
+            console.log('✅ Evento encontrado no Supabase');
             
             // Usar metadados do Supabase se existirem
             if (dbEvent.metadata) {
@@ -394,81 +405,17 @@ async function getEventMetadataForEmail(eventAddress) {
                                "Local a ser definido";
                 
                 organizerName = eventMetadata.organizer?.name || "Organizador";
+                organizerLogo = eventMetadata.organizer?.organizerLogo || '';
+                
+                console.log('✅ Metadados carregados do Supabase:', eventName);
             } else {
                 // Se não tem metadata no Supabase, buscar da blockchain
-                console.log('🔄 Buscando metadados da blockchain...');
-                const eventPubkey = new PublicKey(eventAddress);
-                const eventAccount = await program.account.event.fetch(eventPubkey);
-                
-                if (eventAccount.metadataUri) {
-                    try {
-                        console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
-                        const metadataResponse = await fetch(eventAccount.metadataUri);
-                        if (metadataResponse.ok) {
-                            eventMetadata = await metadataResponse.json();
-                            eventImage = eventMetadata.image || '';
-                            eventName = eventMetadata.name || eventAccount.name || "Evento";
-                            
-                            // ✅ ACESSO SEGURO À DATA (fallback)
-                            eventDate = eventMetadata.properties?.dateTime?.start || 
-                                       eventMetadata.dateTime?.start || 
-                                       eventMetadata.startDate || 
-                                       "Data a ser definida";
-                            
-                            // ✅ ACESSO SEGURO AO LOCAL (fallback)
-                            eventLocation = eventMetadata.properties?.location?.venueName ||
-                                           eventMetadata.properties?.location?.address?.city ||
-                                           eventMetadata.location?.venueName ||
-                                           eventMetadata.location?.address?.city ||
-                                           eventMetadata.location ||
-                                           "Local a ser definido";
-                            
-                            organizerName = eventMetadata.organizer?.name || "Organizador";
-                            
-                            console.log('✅ Metadados carregados do IPFS:', eventName);
-                        }
-                    } catch (ipfsError) {
-                        console.warn('❌ Erro ao buscar metadados do IPFS:', ipfsError);
-                    }
-                }
+                console.log('🔄 Evento no Supabase sem metadados, buscando da blockchain...');
+                await fetchFromBlockchain();
             }
         } else {
             console.log('🔄 Evento não encontrado no Supabase, buscando da blockchain...');
-            // 2. FALLBACK: Buscar diretamente da blockchain
-            const eventPubkey = new PublicKey(eventAddress);
-            const eventAccount = await program.account.event.fetch(eventPubkey);
-            
-            if (eventAccount.metadataUri) {
-                try {
-                    console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
-                    const metadataResponse = await fetch(eventAccount.metadataUri);
-                    if (metadataResponse.ok) {
-                        eventMetadata = await metadataResponse.json();
-                        eventImage = eventMetadata.image || '';
-                        eventName = eventMetadata.name || eventAccount.name || "Evento";
-                        
-                        // ✅ ACESSO SEGURO À DATA (fallback)
-                        eventDate = eventMetadata.properties?.dateTime?.start || 
-                                   eventMetadata.dateTime?.start || 
-                                   eventMetadata.startDate || 
-                                   "Data a ser definida";
-                        
-                        // ✅ ACESSO SEGURO AO LOCAL (fallback)
-                        eventLocation = eventMetadata.properties?.location?.venueName ||
-                                       eventMetadata.properties?.location?.address?.city ||
-                                       eventMetadata.location?.venueName ||
-                                       eventMetadata.location?.address?.city ||
-                                       eventMetadata.location ||
-                                       "Local a ser definido";
-                        
-                        organizerName = eventMetadata.organizer?.name || "Organizador";
-                        
-                        console.log('✅ Metadados carregados do IPFS:', eventName);
-                    }
-                } catch (ipfsError) {
-                    console.warn('❌ Erro ao buscar metadados do IPFS:', ipfsError);
-                }
-            }
+            await fetchFromBlockchain();
         }
     } catch (metadataError) {
         console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError.message);
@@ -479,10 +426,112 @@ async function getEventMetadataForEmail(eventAddress) {
         organizerName = "Organizador";
     }
 
-    console.log('📋 Metadados finais:', { eventName, eventDate, eventLocation, hasImage: !!eventImage });
-    return { eventMetadata, eventImage, eventName, eventDate, eventLocation, organizerName };
+    // Função auxiliar para buscar da blockchain
+    async function fetchFromBlockchain() {
+        try {
+            const eventPubkey = new PublicKey(eventAddress);
+            const eventAccount = await program.account.event.fetch(eventPubkey);
+            
+            if (eventAccount.metadataUri) {
+                console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
+                
+                // Tentar múltiplos gateways IPFS
+                let metadataFetched = false;
+                for (const gateway of ipfsGateways) {
+                    try {
+                        const metadataUrl = eventAccount.metadataUri.replace('https://gateway.pinata.cloud/ipfs/', gateway);
+                        console.log(`   Tentando gateway: ${gateway}`);
+                        
+                        const metadataResponse = await fetch(metadataUrl);
+                        if (metadataResponse.ok) {
+                            eventMetadata = await metadataResponse.json();
+                            metadataFetched = true;
+                            
+                            // Processar URLs de imagem com gateways
+                            eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
+                            eventName = eventMetadata.name || eventAccount.name || "Evento";
+                            
+                            // ✅ ACESSO SEGURO À DATA
+                            eventDate = eventMetadata.properties?.dateTime?.start || 
+                                       eventMetadata.dateTime?.start || 
+                                       eventMetadata.startDate || 
+                                       "Data a ser definida";
+                            
+                            // ✅ ACESSO SEGURO AO LOCAL
+                            eventLocation = eventMetadata.properties?.location?.venueName ||
+                                           eventMetadata.properties?.location?.address?.city ||
+                                           eventMetadata.location?.venueName ||
+                                           eventMetadata.location?.address?.city ||
+                                           eventMetadata.location ||
+                                           "Local a ser definido";
+                            
+                            organizerName = eventMetadata.organizer?.name || "Organizador";
+                            organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
+                            
+                            console.log(`✅ Metadados carregados via gateway: ${gateway}`);
+                            break;
+                        }
+                    } catch (gatewayError) {
+                        console.warn(`   ❌ Gateway falhou: ${gateway}`, gatewayError.message);
+                    }
+                }
+                
+                if (!metadataFetched) {
+                    console.warn('❌ Todos os gateways IPFS falharam');
+                }
+            } else {
+                console.warn('⚠️ Evento não tem metadataUri na blockchain');
+            }
+        } catch (blockchainError) {
+            console.warn('❌ Erro ao buscar evento na blockchain:', blockchainError.message);
+        }
+    }
+
+    console.log('📋 Metadados finais:', { 
+        eventName, 
+        eventDate, 
+        eventLocation, 
+        hasImage: !!eventImage,
+        hasOrganizerLogo: !!organizerLogo 
+    });
+    
+    return { eventMetadata, eventImage, eventName, eventDate, eventLocation, organizerName, organizerLogo };
 }
 
+// Função para otimizar URLs IPFS com múltiplos gateways
+async function optimizeIpfsUrl(ipfsUrl) {
+    if (!ipfsUrl || !ipfsUrl.includes('ipfs')) return ipfsUrl;
+    
+    const gateways = [
+        'https://red-obedient-stingray-854.mypinata.cloud/ipfs/',
+        'https://ipfs.io/ipfs/',
+        'https://gateway.pinata.cloud/ipfs/'
+    ];
+    
+    // Extrair CID da URL
+    const cidMatch = ipfsUrl.match(/ipfs\/([a-zA-Z0-9]+)/);
+    if (!cidMatch) return ipfsUrl;
+    
+    const cid = cidMatch[1];
+    console.log(`   🔄 Otimizando URL IPFS: ${cid}`);
+    
+    // Testar gateways em ordem de preferência
+    for (const gateway of gateways) {
+        try {
+            const testUrl = gateway + cid;
+            const response = await fetch(testUrl, { method: 'HEAD' });
+            if (response.ok) {
+                console.log(`   ✅ Gateway rápido: ${gateway}`);
+                return testUrl;
+            }
+        } catch (error) {
+            // Continuar para o próximo gateway
+        }
+    }
+    
+    // Se nenhum gateway funcionar, retornar a URL original
+    return ipfsUrl;
+}
 // Função auxiliar para enviar email
 async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, mnemonic, privateKey, registrationId, isPaid = false, priceBRLCents = 0 }) {
     if (!email) return;

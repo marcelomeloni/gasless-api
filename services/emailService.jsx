@@ -101,7 +101,7 @@ export async function sendTicketEmail(userData, ticketData) {
                 userName={userName}
                 eventName={eventName}
                 eventDate={ticketData.eventDate}
-                eventLocation={ticketData.eventLocation?.address ? `${ticketData.eventLocation.venueName}, ${ticketData.eventLocation.address.city}` : 'Online'}
+                eventLocation={ticketData.eventLocation || 'Local a ser definido'}
                 eventImage={ticketData.eventImage}
                 organizerName={ticketData.organizerName}
             />

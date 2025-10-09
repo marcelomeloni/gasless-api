@@ -560,66 +560,117 @@ async function optimizeIpfsUrl(ipfsUrl) {
 async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, mnemonic, privateKey, registrationId, isPaid = false, priceBRLCents = 0 }) {
     if (!email) {
         console.log('📧 Usuário sem email, pulando envio');
-        return;
+        return { success: false, error: 'No email provided' };
     }
 
     try {
-        console.log(`📧 Preparando email para: ${email}`);
+        console.log(`📧 Preparando email para: ${email} (${name})`);
+        console.log(`📍 Event Address: ${eventAddress}`);
         
-        // ✅ BUSCAR METADADOS PRIMEIRO
-        const { eventName, eventDate, eventLocation, eventImage, organizerName, organizerLogo } = await getEventMetadataForEmail(eventAddress);
+        // ✅ BUSCAR METADADOS COM VALIDAÇÃO
+        const eventData = await getEventMetadataForEmail(eventAddress);
+        
+        if (!eventData) {
+            console.error('❌ Falha crítica: não foi possível obter dados do evento');
+            return { success: false, error: 'Event data not found' };
+        }
 
-        // ✅ VALIDAR DATA
+        const { 
+            eventName, 
+            eventDate, 
+            eventLocation, 
+            eventImage, 
+            organizerName, 
+            organizerLogo 
+        } = eventData;
+
+        // ✅ VALIDAÇÃO E CORREÇÃO DOS DADOS
+        const safeEventName = eventName && eventName !== "Evento" ? eventName : "Evento Especial";
+        
         let safeEventDate = "Data a ser definida";
         if (eventDate && eventDate !== "Data a ser definida") {
             try {
                 const dateObj = new Date(eventDate);
                 if (!isNaN(dateObj.getTime())) {
-                    safeEventDate = eventDate;
+                    // ✅ FORMATAR DATA CORRETAMENTE
+                    safeEventDate = dateObj.toLocaleDateString('pt-BR', {
+                        day: '2-digit',
+                        month: '2-digit', 
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
                 }
             } catch (dateError) {
                 console.warn('❌ Data inválida, usando padrão:', dateError);
             }
         }
 
-        // ✅ DADOS SEGUROS PARA O EMAIL
+        const safeEventLocation = eventLocation && eventLocation !== "Local a ser definido" 
+            ? eventLocation 
+            : "Local a ser definido";
+
+        const safeOrganizerName = organizerName && organizerName !== "Organizador" 
+            ? organizerName 
+            : "Organizador";
+
+        // ✅ ESTRUTURA DE DADOS CORRETA PARA O EMAIL
         const ticketDataForEmail = {
-            eventName: eventName || "Evento",
+            // ✅ DADOS DO EVENTO (VALIDADOS)
+            eventName: safeEventName,
             eventDate: safeEventDate,
-            eventLocation: eventLocation || "Local a ser definido",
-            mintAddress,
-            seedPhrase: mnemonic, 
-            privateKey, 
+            eventLocation: safeEventLocation,
             eventImage: eventImage || '',
-            registrationId,
-            organizerName: organizerName || "Organizador",
+            organizerName: safeOrganizerName,
             organizerLogo: organizerLogo || '',
-            // ✅ Incluir campos adicionais para paid tickets
+            
+            // ✅ DADOS DO TICKET
+            mintAddress: mintAddress,
+            registrationId: registrationId,
+            
+            // ✅ DADOS DA CARTEIRA (APENAS PARA NOVOS USUÁRIOS)
+            ...(mnemonic && { seedPhrase: mnemonic }),
+            ...(privateKey && { privateKey: privateKey }),
+            
+            // ✅ DADOS DE PAGAMENTO (APENAS PARA INGRESSOS PAGOS)
             ...(isPaid && { 
                 isPaid: true,
-                paymentAmount: (priceBRLCents / 100).toFixed(2)
+                paymentAmount: priceBRLCents ? (priceBRLCents / 100).toFixed(2) : "0.00"
             })
         };
 
-        console.log('🎯 Dados finais para email:', {
+        console.log('🎯 DADOS FINAIS PARA EMAIL (VALIDADOS):', {
             eventName: ticketDataForEmail.eventName,
             eventDate: ticketDataForEmail.eventDate,
-            eventLocation: ticketDataForEmail.eventLocation.substring(0, 50) + '...',
-            hasImage: !!ticketDataForEmail.eventImage
+            eventLocation: ticketDataForEmail.eventLocation,
+            hasImage: !!ticketDataForEmail.eventImage,
+            organizerName: ticketDataForEmail.organizerName,
+            hasOrganizerLogo: !!ticketDataForEmail.organizerLogo,
+            isPaid: ticketDataForEmail.isPaid || false,
+            paymentAmount: ticketDataForEmail.paymentAmount || 'N/A'
         });
 
-        const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+        // ✅ ENVIO DO EMAIL
+        console.log(`📤 Enviando email para: ${email}`);
+        const emailResult = await sendTicketEmail({ 
+            name: name || "Participante", 
+            email: email 
+        }, ticketDataForEmail);
         
         if (!emailResult.success) {
-            console.error("❌ Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+            console.error("❌ Falha no envio de e-mail:", emailResult.error);
+            return { success: false, error: emailResult.error };
         } else {
             console.log("✅ E-mail enviado com sucesso para:", email);
+            return { success: true };
         }
         
-    } catch(e) {
-        console.error("❌ Falha ao enviar e-mail (mas o mint funcionou):", e);
+    } catch (error) {
+        console.error("❌ Falha crítica ao enviar e-mail:", error);
+        return { success: false, error: error.message };
     }
 }
+
 export const mintForExistingUser = async (req, res) => {
     const { eventAddress, buyerAddress, tierIndex, name, phone, email, company, sector, role } = req.body;
     if (!eventAddress || !buyerAddress || tierIndex === undefined) {

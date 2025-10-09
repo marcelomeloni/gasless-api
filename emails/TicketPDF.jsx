@@ -308,6 +308,14 @@ export const TicketPDF = ({ ticketData, qrCodeImage, brandLogoImage }) => {
   const { eventName, eventDate, eventLocation, mintAddress, seedPhrase, privateKey, eventImage, registrationId  } = ticketData;
 
   const formatFullAddress = (location) => {
+    console.log('📍 Dados de localização no PDF:', location);
+    
+    // Se já for uma string formatada (vinda do email), retorna diretamente
+    if (typeof location === 'string') {
+      return location;
+    }
+    
+    // Se for um objeto, formata como antes
     if (!location || location.type !== 'Physical' || !location.address) { 
         return "Local a definir"; 
     }
@@ -324,17 +332,23 @@ export const TicketPDF = ({ ticketData, qrCodeImage, brandLogoImage }) => {
     if (address.zipCode) lines.push(`CEP: ${address.zipCode}`);
     
     return lines.join('\n');
-};
+  };
 
   const formatDisplayDate = (dateString) => {
     if (!dateString) return 'Data a definir';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('pt-BR', { 
-      weekday: 'long', 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric' 
-    });
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) return 'Data a definir';
+      
+      return date.toLocaleDateString('pt-BR', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    } catch (error) {
+      return 'Data a definir';
+    }
   };
 
   const formatDisplayTime = (dateString) => {

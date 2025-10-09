@@ -1403,16 +1403,19 @@ export const getEventDetailsFast = async (req, res) => {
         }
       }
 
-      // ✅ BUSCAR METADADOS DO IPFS SE NÃO ENCONTRADOS NO SUPABASE
+      // ✅ BUSCAR METADADOS DO IPFS COM MÚLTIPLOS FALLBACKS (IGUAL AO getActiveEventsFast)
       if (!supabaseEvent && blockchainAccount.metadataUri) {
         try {
-          console.log(' -> Buscando metadados do IPFS...');
-          const ipfsMetadata = await fetchMetadataOptimized(blockchainAccount.metadataUri);
+          console.log(' -> Buscando metadados do IPFS com múltiplos fallbacks...');
+          const ipfsMetadata = await fetchMetadataWithMultipleFallbacks(blockchainAccount.metadataUri);
+          
           if (ipfsMetadata) {
             finalMetadata = ipfsMetadata;
             finalImageUrl = ipfsMetadata.image || '';
             finalOrganizerLogo = ipfsMetadata.organizer?.organizerLogo || '';
-            console.log(' ✅ Metadados carregados do IPFS');
+            console.log(' ✅ Metadados carregados do IPFS com fallbacks');
+          } else {
+            console.warn(' ⚠️  Não foi possível carregar metadados do IPFS mesmo com fallbacks');
           }
         } catch (ipfsError) {
           console.warn(' ⚠️  Erro ao buscar metadados do IPFS:', ipfsError.message);
@@ -1424,14 +1427,41 @@ export const getEventDetailsFast = async (req, res) => {
       // Não retornamos erro aqui, pois podemos usar dados do Supabase
     }
 
-    // ✅ 3. SE NÃO ENCONTROU METADADOS, USAR FALLBACK
+    // ✅ 3. SE NÃO ENCONTROU METADADOS, TENTAR FALLBACKS ADICIONAIS (IGUAL AO getActiveEventsFast)
+    if ((!finalMetadata.name || finalMetadata.name === 'Evento Sem Nome') && eventAddress) {
+      console.log(` 🔄 Tentando fallbacks adicionais para: ${eventAddress}`);
+      
+      // ✅ ESTRATÉGIA: Buscar dados da blockchain para fallback (se não tentou antes)
+      if (!blockchainAccount) {
+        try {
+          console.log(' -> Buscando dados da blockchain como fallback...');
+          const fallbackBlockchainAccount = await program.account.event.fetch(eventPubkey);
+          
+          if (fallbackBlockchainAccount.metadataUri) {
+            console.log(' -> Tentando IPFS novamente com fallback...');
+            const ipfsMetadata = await fetchMetadataWithMultipleFallbacks(fallbackBlockchainAccount.metadataUri);
+            if (ipfsMetadata) {
+              finalMetadata = { ...finalMetadata, ...ipfsMetadata };
+              finalImageUrl = finalImageUrl || ipfsMetadata.image || '';
+              finalOrganizerLogo = finalOrganizerLogo || ipfsMetadata.organizer?.organizerLogo || '';
+              console.log(' ✅ Metadados carregados via fallback da blockchain');
+            }
+          }
+        } catch (fallbackError) {
+          console.warn(` ⚠️  Não foi possível buscar dados da blockchain como fallback:`, fallbackError.message);
+        }
+      }
+    }
+
+    // ✅ 4. APLICAR FALLBACK DE METADADOS SE NECESSÁRIO (IGUAL AO getActiveEventsFast)
     if (!finalMetadata.name || finalMetadata.name === 'Evento Sem Nome') {
       console.warn(' ⚠️  Usando metadados fallback aprimorados');
       finalMetadata = {
+        ...finalMetadata,
         name: "Evento em Andamento",
-        description: "Estamos preparando as informações deste evento. Volte em breve para mais detalhes.",
-        category: "Geral",
-        properties: {
+        description: finalMetadata.description || "Estamos preparando as informações deste evento. Volte em breve para mais detalhes.",
+        category: finalMetadata.category || "Geral",
+        properties: finalMetadata.properties || {
           dateTime: {
             start: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
             end: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
@@ -1447,12 +1477,12 @@ export const getEventDetailsFast = async (req, res) => {
             }
           }
         },
-        organizer: {
+        organizer: finalMetadata.organizer || {
           name: "Organizador",
           contactEmail: "contato@evento.com",
           website: ""
         },
-        additionalInfo: {
+        additionalInfo: finalMetadata.additionalInfo || {
           ageRestriction: "Livre",
           accessibility: "Acessível",
           complementaryHours: 0
@@ -1460,8 +1490,11 @@ export const getEventDetailsFast = async (req, res) => {
       };
     }
 
-    // ✅ 4. PROCESSAR IMAGENS COM FALLBACK MELHORADO
+    // ✅ 5. PROCESSAR IMAGENS COM FALLBACK MELHORADO (IGUAL AO getActiveEventsFast)
     try {
+      console.log(' -> Processando imagens com múltiplos fallbacks...');
+      
+      // ✅ PRIMEIRO: Tentar processar com getImagesWithFallback
       const { eventImageUrl, organizerLogoUrl } = await getImagesWithFallback({
         image_url: finalImageUrl,
         metadata: finalMetadata
@@ -1469,12 +1502,36 @@ export const getEventDetailsFast = async (req, res) => {
       
       finalImageUrl = eventImageUrl;
       finalOrganizerLogo = organizerLogoUrl;
-      console.log(' ✅ Imagens processadas com fallback');
+      console.log(' ✅ Imagens processadas com fallback principal');
+      
     } catch (imageError) {
-      console.warn(' ⚠️  Erro ao processar imagens:', imageError.message);
+      console.warn(' ⚠️  Erro ao processar imagens com fallback principal:', imageError.message);
+      
+      // ✅ SEGUNDO: Fallback manual para imagens IPFS
+      try {
+        if (finalImageUrl && (finalImageUrl.includes('ipfs') || finalImageUrl.includes('pinata'))) {
+          console.log(' -> Aplicando fallback manual para imagem IPFS...');
+          const accessibleImageUrl = await getAccessibleIpfsUrl(finalImageUrl);
+          if (accessibleImageUrl && accessibleImageUrl !== finalImageUrl) {
+            finalImageUrl = accessibleImageUrl;
+            console.log(' ✅ Imagem IPFS otimizada com fallback manual');
+          }
+        }
+        
+        if (finalOrganizerLogo && (finalOrganizerLogo.includes('ipfs') || finalOrganizerLogo.includes('pinata'))) {
+          console.log(' -> Aplicando fallback manual para logo do organizador...');
+          const accessibleLogoUrl = await getAccessibleIpfsUrl(finalOrganizerLogo);
+          if (accessibleLogoUrl && accessibleLogoUrl !== finalOrganizerLogo) {
+            finalOrganizerLogo = accessibleLogoUrl;
+            console.log(' ✅ Logo do organizador otimizado com fallback manual');
+          }
+        }
+      } catch (manualFallbackError) {
+        console.warn(' ⚠️  Erro no fallback manual de imagens:', manualFallbackError.message);
+      }
     }
 
-    // ✅ 5. USAR TIERS DA BLOCKCHAIN (PREFERÊNCIA) OU DO SUPABASE
+    // ✅ 6. USAR TIERS DA BLOCKCHAIN (PREFERÊNCIA) OU DO SUPABASE
     let formattedTiers = blockchainTiers;
     
     // Se não tem tiers da blockchain, tentar do Supabase
@@ -1505,7 +1562,7 @@ export const getEventDetailsFast = async (req, res) => {
       }
     }
 
-    // ✅ 6. ESTRUTURA FINAL COMPLETA DO EVENTO
+    // ✅ 7. ESTRUTURA FINAL COMPLETA DO EVENTO
     const eventData = {
       publicKey: eventAddress,
       account: {
@@ -1552,6 +1609,8 @@ export const getEventDetailsFast = async (req, res) => {
     console.log(`   - Ingressos: ${totalTicketsSold}/${maxTotalSupply} vendidos (${eventData.stats.progressPercentage}%)`);
     console.log(`   - Tiers esgotados: ${eventData.stats.soldOutTiers}`);
     console.log(`   - Fonte: ${supabaseEvent ? 'Supabase' : blockchainAccount ? 'Blockchain' : 'Fallback'}`);
+    console.log(`   - Imagem: ${finalImageUrl ? '✓' : '✗'}`);
+    console.log(`   - Logo Organizador: ${finalOrganizerLogo ? '✓' : '✗'}`);
 
     res.status(200).json({
       success: true,
@@ -1560,7 +1619,9 @@ export const getEventDetailsFast = async (req, res) => {
         blockchain: !!blockchainAccount,
         supabase: !!supabaseEvent,
         ipfsFallback: true,
-        usedFallback: !supabaseEvent && !blockchainAccount
+        usedFallback: !supabaseEvent && !blockchainAccount,
+        imageSource: finalImageUrl ? 'processed' : 'fallback',
+        metadataSource: supabaseEvent ? 'supabase' : blockchainAccount ? 'blockchain+ipfs' : 'fallback'
       },
       performance: {
         duration: duration,
@@ -1584,6 +1645,100 @@ export const getEventDetailsFast = async (req, res) => {
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
+};
+
+// ✅ FUNÇÃO AUXILIAR: Buscar metadados com múltiplos fallbacks (igual ao getActiveEventsFast)
+const fetchMetadataWithMultipleFallbacks = async (metadataUri) => {
+  if (!metadataUri) return null;
+
+  console.log(`   🔄 Tentando múltiplos fallbacks para: ${metadataUri}`);
+  
+  const strategies = [
+    // Estratégia 1: fetchMetadataOptimized (já tem fallbacks internos)
+    async () => {
+      try {
+        console.log('     🚀 Tentando fetchMetadataOptimized...');
+        const result = await fetchMetadataOptimized(metadataUri);
+        if (result) {
+          console.log('     ✅ Sucesso com fetchMetadataOptimized');
+          return result;
+        }
+      } catch (error) {
+        console.log('     ❌ fetchMetadataOptimized falhou:', error.message);
+      }
+      return null;
+    },
+    
+    // Estratégia 2: Tentar gateways alternativos manualmente
+    async () => {
+      try {
+        console.log('     🌐 Tentando gateways alternativos manualmente...');
+        const gateways = [
+          metadataUri.replace('https://gateway.pinata.cloud/ipfs/', 'https://ipfs.io/ipfs/'),
+          metadataUri.replace('https://gateway.pinata.cloud/ipfs/', 'https://cloudflare-ipfs.com/ipfs/'),
+          metadataUri.replace('https://gateway.pinata.cloud/ipfs/', 'https://dweb.link/ipfs/'),
+          metadataUri.replace('https://gateway.pinata.cloud/ipfs/', 'https://gateway.ipfs.io/ipfs/'),
+        ];
+
+        for (const gateway of gateways) {
+          if (gateway === metadataUri) continue; // Pular se for o mesmo
+          
+          try {
+            console.log(`       🔄 Tentando gateway: ${new URL(gateway).hostname}`);
+            const response = await fetch(gateway, { timeout: 5000 });
+            if (response.ok) {
+              const metadata = await response.json();
+              console.log(`       ✅ Sucesso com gateway: ${new URL(gateway).hostname}`);
+              return metadata;
+            }
+          } catch (gatewayError) {
+            console.log(`       ❌ Gateway falhou: ${new URL(gateway).hostname}`);
+          }
+        }
+      } catch (error) {
+        console.log('     ❌ Gateways alternativos falharam:', error.message);
+      }
+      return null;
+    },
+    
+    // Estratégia 3: Tentar com timeout mais longo
+    async () => {
+      try {
+        console.log('     ⏱️  Tentando com timeout estendido...');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000); // 10 segundos
+        
+        const response = await fetch(metadataUri, { 
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; EventApp/1.0)'
+          }
+        });
+        
+        clearTimeout(timeout);
+        
+        if (response.ok) {
+          const metadata = await response.json();
+          console.log('     ✅ Sucesso com timeout estendido');
+          return metadata;
+        }
+      } catch (error) {
+        console.log('     ❌ Timeout estendido falhou:', error.message);
+      }
+      return null;
+    }
+  ];
+
+  // Executar todas as estratégias em sequência
+  for (const strategy of strategies) {
+    const result = await strategy();
+    if (result) {
+      return result;
+    }
+  }
+
+  console.log('   ❌ Todos os fallbacks de metadados falharam');
+  return null;
 };
 
 // ✅ FUNÇÃO AUXILIAR PARA ATUALIZAR SUPABASE COM DADOS DE TICKETS

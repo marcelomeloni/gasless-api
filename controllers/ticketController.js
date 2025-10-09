@@ -352,55 +352,7 @@ export const generateWalletAndMintPaid = async (req, res) => {
         });
     }
 };
-// Função auxiliar para buscar metadados do evento com múltiplos fallbacks
-function formatEventLocation(location) {
-    if (!location) return "Local a ser definido";
 
-    // Se for online
-    if (location.type === 'Online') {
-        return location.onlineUrl || 'Evento Online';
-    }
-
-    // Se for físico (estrutura do seu JSON)
-    if (location.type === 'Physical') {
-        const venue = location.venueName || '';
-        const address = location.address;
-        
-        if (address) {
-            const street = address.street || '';
-            const number = address.number || '';
-            const neighborhood = address.neighborhood || '';
-            const city = address.city || '';
-            const state = address.state || '';
-            const country = address.country || '';
-
-            // Monta o endereço completo
-            const addressParts = [];
-            
-            // Primeira linha: Venue Name (mais importante)
-            if (venue) addressParts.push(venue);
-            
-            // Segunda linha: Rua, Número - Bairro
-            const streetLine = [street, number].filter(Boolean).join(', ');
-            if (streetLine) addressParts.push(streetLine);
-            if (neighborhood) addressParts.push(neighborhood);
-            
-            // Terceira linha: Cidade - Estado, CEP
-            const cityLine = [city, state].filter(Boolean).join(' - ');
-            if (cityLine) addressParts.push(cityLine);
-            if (address.zipCode) addressParts.push(`CEP: ${address.zipCode}`);
-            
-            return addressParts.join('\n');
-        }
-        
-        return venue || "Local a ser definido";
-    }
-
-    return "Local a ser definido";
-}
-
-// Na função getEventMetadataForEmail, atualize a parte do local:
-// ✅ VERSÃO FINAL DEFINITIVA - Busca robusta de metadados
 async function getEventMetadataForEmail(eventAddress) {
     let eventMetadata = {};
     let eventImage = '';

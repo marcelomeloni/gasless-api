@@ -5,7 +5,7 @@ export function TicketEmail({
   userName, 
   eventName, 
   eventDate, 
-  eventLocation, 
+  eventLocation,  // ✅ JÁ DEVE VIR FORMATADO COMO STRING
   eventImage,
   organizerName,
   organizerLogo
@@ -33,6 +33,15 @@ export function TicketEmail({
   };
 
   const formattedDate = formatDateSafely(eventDate);
+
+  // ✅ DEBUG CRÍTICO - Remover após corrigir
+  console.log('🔍 DADOS NO EMAIL COMPONENT:', {
+    eventName,
+    eventDate,
+    eventLocation, // Deve ser string "a\na, a\na\na - a\nCEP: a"
+    formattedDate,
+    organizerName
+  });
 
   return (
     <Html>
@@ -71,7 +80,9 @@ export function TicketEmail({
               
               <Text style={detailLabel}>📍 LOCAL</Text>
               {/* ✅ CORREÇÃO CRÍTICA: Manter quebras de linha */}
-              <Text style={{...detailValue, whiteSpace: 'pre-line'}}>{eventLocation}</Text>
+              <Text style={{...detailValue, whiteSpace: 'pre-line'}}>
+                {eventLocation || "Local a ser definido"}
+              </Text>
             </Section>
 
             {/* ORGANIZADOR */}

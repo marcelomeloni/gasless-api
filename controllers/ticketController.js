@@ -400,6 +400,7 @@ function formatEventLocation(location) {
 }
 
 // Na função getEventMetadataForEmail, atualize a parte do local:
+// ✅ VERSÃO FINAL DEFINITIVA - Busca robusta de metadados
 async function getEventMetadataForEmail(eventAddress) {
     let eventMetadata = {};
     let eventImage = '';
@@ -422,26 +423,34 @@ async function getEventMetadataForEmail(eventAddress) {
         if (!dbError && dbEvent) {
             console.log('✅ Evento encontrado no Supabase');
             
+            // SEMPRE usar metadados do Supabase se existirem
             if (dbEvent.metadata) {
                 eventMetadata = dbEvent.metadata;
                 eventImage = dbEvent.image_url || eventMetadata.image || '';
                 eventName = eventMetadata.name || dbEvent.event_name || "Evento";
                 
-                // ✅ ACESSO SEGURO À DATA
+                // ✅ ACESSO SEGURO À DATA - CORRIGIDO
                 eventDate = eventMetadata.properties?.dateTime?.start || 
-                           eventMetadata.dateTime?.start || 
                            eventMetadata.startDate || 
                            "Data a ser definida";
                 
                 // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
-                eventLocation = formatEventLocation(eventMetadata.properties?.location) || 
-                               formatEventLocation(eventMetadata.location) ||
-                               "Local a ser definido";
+                if (eventMetadata.properties?.location) {
+                    eventLocation = formatEventLocation(eventMetadata.properties.location);
+                } else if (eventMetadata.location) {
+                    eventLocation = formatEventLocation(eventMetadata.location);
+                } else {
+                    eventLocation = "Local a ser definido";
+                }
                 
                 organizerName = eventMetadata.organizer?.name || "Organizador";
                 organizerLogo = eventMetadata.organizer?.organizerLogo || '';
                 
-                console.log('✅ Metadados carregados do Supabase:', eventName);
+                console.log('✅ Metadados carregados do Supabase:', { 
+                    eventName, 
+                    eventDate,
+                    eventLocation: eventLocation.substring(0, 50) + '...' 
+                });
             } else {
                 console.log('🔄 Evento no Supabase sem metadados, buscando da blockchain...');
                 await fetchFromBlockchain();
@@ -451,46 +460,6 @@ async function getEventMetadataForEmail(eventAddress) {
             await fetchFromBlockchain();
         }
 
-        // Função auxiliar para buscar da blockchain
-        async function fetchFromBlockchain() {
-            try {
-                const eventPubkey = new PublicKey(eventAddress);
-                const eventAccount = await program.account.event.fetch(eventPubkey);
-                
-                if (eventAccount.metadataUri) {
-                    console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
-                    
-                    const metadataResponse = await fetch(eventAccount.metadataUri);
-                    if (metadataResponse.ok) {
-                        eventMetadata = await metadataResponse.json();
-                        
-                        // Processar URLs de imagem com gateways
-                        eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
-                        eventName = eventMetadata.name || eventAccount.name || "Evento";
-                        
-                        // ✅ ACESSO SEGURO À DATA
-                        eventDate = eventMetadata.properties?.dateTime?.start || 
-                                   eventMetadata.dateTime?.start || 
-                                   eventMetadata.startDate || 
-                                   "Data a ser definida";
-                        
-                        // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
-                        eventLocation = formatEventLocation(eventMetadata.properties?.location) || 
-                                       formatEventLocation(eventMetadata.location) ||
-                                       "Local a ser definido";
-                        
-                        organizerName = eventMetadata.organizer?.name || "Organizador";
-                        organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
-                        
-                        console.log('✅ Metadados carregados do IPFS:', eventName);
-                    }
-                } else {
-                    console.warn('⚠️ Evento não tem metadataUri na blockchain');
-                }
-            } catch (blockchainError) {
-                console.warn('❌ Erro ao buscar evento na blockchain:', blockchainError.message);
-            }
-        }
     } catch (metadataError) {
         console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError.message);
         // FALLBACK FINAL: Valores padrão
@@ -503,14 +472,107 @@ async function getEventMetadataForEmail(eventAddress) {
     console.log('📋 Metadados finais:', { 
         eventName, 
         eventDate, 
-        eventLocation: eventLocation.replace(/\n/g, ' | '), // Para log ficar legível
+        eventLocation: eventLocation.substring(0, 100),
         hasImage: !!eventImage,
         hasOrganizerLogo: !!organizerLogo 
     });
     
     return { eventMetadata, eventImage, eventName, eventDate, eventLocation, organizerName, organizerLogo };
+
+    // Função auxiliar para buscar da blockchain
+    async function fetchFromBlockchain() {
+        try {
+            const eventPubkey = new PublicKey(eventAddress);
+            const eventAccount = await program.account.event.fetch(eventPubkey);
+            
+            if (eventAccount.metadataUri) {
+                console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
+                
+                const metadataResponse = await fetch(eventAccount.metadataUri);
+                if (metadataResponse.ok) {
+                    eventMetadata = await metadataResponse.json();
+                    
+                    // Processar URLs de imagem com gateways
+                    eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
+                    eventName = eventMetadata.name || eventAccount.name || "Evento";
+                    
+                    // ✅ ACESSO SEGURO À DATA - CORRIGIDO
+                    eventDate = eventMetadata.properties?.dateTime?.start || 
+                               eventMetadata.startDate || 
+                               "Data a ser definida";
+                    
+                    // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
+                    if (eventMetadata.properties?.location) {
+                        eventLocation = formatEventLocation(eventMetadata.properties.location);
+                    } else if (eventMetadata.location) {
+                        eventLocation = formatEventLocation(eventMetadata.location);
+                    } else {
+                        eventLocation = "Local a ser definido";
+                    }
+                    
+                    organizerName = eventMetadata.organizer?.name || "Organizador";
+                    organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
+                    
+                    console.log('✅ Metadados carregados do IPFS:', eventName);
+                }
+            } else {
+                console.warn('⚠️ Evento não tem metadataUri na blockchain');
+            }
+        } catch (blockchainError) {
+            console.warn('❌ Erro ao buscar evento na blockchain:', blockchainError.message);
+        }
+    }
 }
 
+// ✅ VERSÃO FINAL DEFINITIVA - Formatação do local
+function formatEventLocation(location) {
+    if (!location) return "Local a ser definido";
+
+    // Se for online
+    if (location.type === 'Online') {
+        return location.onlineUrl || 'Evento Online';
+    }
+
+    // Se for físico (estrutura do seu JSON)
+    if (location.type === 'Physical') {
+        const venue = location.venueName || '';
+        const address = location.address;
+        
+        if (address) {
+            const street = address.street || '';
+            const number = address.number || '';
+            const neighborhood = address.neighborhood || '';
+            const city = address.city || '';
+            const state = address.state || '';
+
+            // Monta o endereço completo
+            const addressParts = [];
+            
+            // Primeira linha: Venue Name (mais importante)
+            if (venue) addressParts.push(venue);
+            
+            // Segunda linha: Rua, Número
+            const streetLine = [street, number].filter(Boolean).join(', ');
+            if (streetLine) addressParts.push(streetLine);
+            
+            // Terceira linha: Bairro
+            if (neighborhood) addressParts.push(neighborhood);
+            
+            // Quarta linha: Cidade - Estado
+            const cityLine = [city, state].filter(Boolean).join(' - ');
+            if (cityLine) addressParts.push(cityLine);
+            
+            // Quinta linha: CEP
+            if (address.zipCode) addressParts.push(`CEP: ${address.zipCode}`);
+            
+            return addressParts.join('\n');
+        }
+        
+        return venue || "Local a ser definido";
+    }
+
+    return "Local a ser definido";
+}
 // Função para otimizar URLs IPFS (mantenha a que você já tem)
 async function optimizeIpfsUrl(ipfsUrl) {
     if (!ipfsUrl || !ipfsUrl.includes('ipfs')) return ipfsUrl;
@@ -546,23 +608,44 @@ async function optimizeIpfsUrl(ipfsUrl) {
     return ipfsUrl;
 }
 // Função auxiliar para enviar email
+// ✅ VERSÃO FINAL DEFINITIVA - Envio seguro de email
 async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, mnemonic, privateKey, registrationId, isPaid = false, priceBRLCents = 0 }) {
-    if (!email) return;
+    if (!email) {
+        console.log('📧 Usuário sem email, pulando envio');
+        return;
+    }
 
     try {
-        const { eventName, eventDate, eventLocation, eventImage, organizerName } = await getEventMetadataForEmail(eventAddress);
+        console.log(`📧 Preparando email para: ${email}`);
+        
+        // ✅ BUSCAR METADADOS PRIMEIRO
+        const { eventName, eventDate, eventLocation, eventImage, organizerName, organizerLogo } = await getEventMetadataForEmail(eventAddress);
+
+        // ✅ VALIDAR DATA - CORREÇÃO CRÍTICA
+        let safeEventDate = "Data a ser definida";
+        if (eventDate && eventDate !== "Data a ser definida") {
+            try {
+                const dateObj = new Date(eventDate);
+                if (!isNaN(dateObj.getTime())) {
+                    safeEventDate = eventDate;
+                }
+            } catch (dateError) {
+                console.warn('❌ Data inválida, usando padrão:', dateError);
+            }
+        }
 
         // ✅ DADOS SEGUROS PARA O EMAIL
         const ticketDataForEmail = {
-            eventName,
-            eventDate,
-            eventLocation,
+            eventName: eventName || "Evento",
+            eventDate: safeEventDate,
+            eventLocation: eventLocation || "Local a ser definido",
             mintAddress,
             seedPhrase: mnemonic, 
             privateKey, 
-            eventImage,
+            eventImage: eventImage || '',
             registrationId,
-            organizerName,
+            organizerName: organizerName || "Organizador",
+            organizerLogo: organizerLogo || '',
             // ✅ Incluir campos adicionais para paid tickets
             ...(isPaid && { 
                 isPaid: true,
@@ -570,23 +653,24 @@ async function sendTicketEmailSafely({ email, name, eventAddress, mintAddress, m
             })
         };
 
-        console.log('📧 Dados preparados para email:', {
+        console.log('🎯 Dados finais para email:', {
             eventName: ticketDataForEmail.eventName,
             eventDate: ticketDataForEmail.eventDate,
-            eventLocation: ticketDataForEmail.eventLocation,
-            hasImage: !!ticketDataForEmail.eventImage
+            eventLocation: ticketDataForEmail.eventLocation.substring(0, 50) + '...',
+            hasImage: !!ticketDataForEmail.eventImage,
+            hasOrganizerLogo: !!ticketDataForEmail.organizerLogo
         });
 
         const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
         
         if (!emailResult.success) {
-            console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+            console.error("❌ Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
         } else {
             console.log("✅ E-mail enviado com sucesso para:", email);
         }
         
     } catch(e) {
-        console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+        console.error("❌ Falha ao enviar e-mail (mas o mint funcionou):", e);
     }
 }
 export const mintForExistingUser = async (req, res) => {

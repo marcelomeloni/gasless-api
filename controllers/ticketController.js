@@ -353,6 +353,53 @@ export const generateWalletAndMintPaid = async (req, res) => {
     }
 };
 // Função auxiliar para buscar metadados do evento com múltiplos fallbacks
+function formatEventLocation(location) {
+    if (!location) return "Local a ser definido";
+
+    // Se for online
+    if (location.type === 'Online') {
+        return location.onlineUrl || 'Evento Online';
+    }
+
+    // Se for físico (estrutura do seu JSON)
+    if (location.type === 'Physical') {
+        const venue = location.venueName || '';
+        const address = location.address;
+        
+        if (address) {
+            const street = address.street || '';
+            const number = address.number || '';
+            const neighborhood = address.neighborhood || '';
+            const city = address.city || '';
+            const state = address.state || '';
+            const country = address.country || '';
+
+            // Monta o endereço completo
+            const addressParts = [];
+            
+            // Primeira linha: Venue Name (mais importante)
+            if (venue) addressParts.push(venue);
+            
+            // Segunda linha: Rua, Número - Bairro
+            const streetLine = [street, number].filter(Boolean).join(', ');
+            if (streetLine) addressParts.push(streetLine);
+            if (neighborhood) addressParts.push(neighborhood);
+            
+            // Terceira linha: Cidade - Estado, CEP
+            const cityLine = [city, state].filter(Boolean).join(' - ');
+            if (cityLine) addressParts.push(cityLine);
+            if (address.zipCode) addressParts.push(`CEP: ${address.zipCode}`);
+            
+            return addressParts.join('\n');
+        }
+        
+        return venue || "Local a ser definido";
+    }
+
+    return "Local a ser definido";
+}
+
+// Na função getEventMetadataForEmail, atualize a parte do local:
 async function getEventMetadataForEmail(eventAddress) {
     let eventMetadata = {};
     let eventImage = '';
@@ -361,15 +408,6 @@ async function getEventMetadataForEmail(eventAddress) {
     let eventLocation = "Local a ser definido";
     let organizerName = "Organizador";
     let organizerLogo = '';
-
-    // Lista de gateways IPFS com prioridade
-    const ipfsGateways = [
-        'https://red-obedient-stingray-854.mypinata.cloud/ipfs/',
-        'https://ipfs.io/ipfs/',
-        'https://gateway.pinata.cloud/ipfs/',
-        'https://cloudflare-ipfs.com/ipfs/',
-        'https://dweb.link/ipfs/'
-    ];
 
     try {
         console.log(`🔍 Buscando metadados para evento: ${eventAddress}`);
@@ -384,7 +422,6 @@ async function getEventMetadataForEmail(eventAddress) {
         if (!dbError && dbEvent) {
             console.log('✅ Evento encontrado no Supabase');
             
-            // Usar metadados do Supabase se existirem
             if (dbEvent.metadata) {
                 eventMetadata = dbEvent.metadata;
                 eventImage = dbEvent.image_url || eventMetadata.image || '';
@@ -396,12 +433,9 @@ async function getEventMetadataForEmail(eventAddress) {
                            eventMetadata.startDate || 
                            "Data a ser definida";
                 
-                // ✅ ACESSO SEGURO AO LOCAL
-                eventLocation = eventMetadata.properties?.location?.venueName ||
-                               eventMetadata.properties?.location?.address?.city ||
-                               eventMetadata.location?.venueName ||
-                               eventMetadata.location?.address?.city ||
-                               eventMetadata.location ||
+                // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
+                eventLocation = formatEventLocation(eventMetadata.properties?.location) || 
+                               formatEventLocation(eventMetadata.location) ||
                                "Local a ser definido";
                 
                 organizerName = eventMetadata.organizer?.name || "Organizador";
@@ -409,7 +443,6 @@ async function getEventMetadataForEmail(eventAddress) {
                 
                 console.log('✅ Metadados carregados do Supabase:', eventName);
             } else {
-                // Se não tem metadata no Supabase, buscar da blockchain
                 console.log('🔄 Evento no Supabase sem metadados, buscando da blockchain...');
                 await fetchFromBlockchain();
             }
@@ -417,80 +450,60 @@ async function getEventMetadataForEmail(eventAddress) {
             console.log('🔄 Evento não encontrado no Supabase, buscando da blockchain...');
             await fetchFromBlockchain();
         }
+
+        // Função auxiliar para buscar da blockchain
+        async function fetchFromBlockchain() {
+            try {
+                const eventPubkey = new PublicKey(eventAddress);
+                const eventAccount = await program.account.event.fetch(eventPubkey);
+                
+                if (eventAccount.metadataUri) {
+                    console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
+                    
+                    const metadataResponse = await fetch(eventAccount.metadataUri);
+                    if (metadataResponse.ok) {
+                        eventMetadata = await metadataResponse.json();
+                        
+                        // Processar URLs de imagem com gateways
+                        eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
+                        eventName = eventMetadata.name || eventAccount.name || "Evento";
+                        
+                        // ✅ ACESSO SEGURO À DATA
+                        eventDate = eventMetadata.properties?.dateTime?.start || 
+                                   eventMetadata.dateTime?.start || 
+                                   eventMetadata.startDate || 
+                                   "Data a ser definida";
+                        
+                        // ✅ ACESSO SEGURO AO LOCAL - CORRIGIDO
+                        eventLocation = formatEventLocation(eventMetadata.properties?.location) || 
+                                       formatEventLocation(eventMetadata.location) ||
+                                       "Local a ser definido";
+                        
+                        organizerName = eventMetadata.organizer?.name || "Organizador";
+                        organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
+                        
+                        console.log('✅ Metadados carregados do IPFS:', eventName);
+                    }
+                } else {
+                    console.warn('⚠️ Evento não tem metadataUri na blockchain');
+                }
+            } catch (blockchainError) {
+                console.warn('❌ Erro ao buscar evento na blockchain:', blockchainError.message);
+            }
+        }
     } catch (metadataError) {
         console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError.message);
-        // 3. FALLBACK FINAL: Valores padrão
+        // FALLBACK FINAL: Valores padrão
         eventName = "Evento Especial";
         eventDate = "Data a ser definida";
         eventLocation = "Local a ser definido";
         organizerName = "Organizador";
     }
 
-    // Função auxiliar para buscar da blockchain
-    async function fetchFromBlockchain() {
-        try {
-            const eventPubkey = new PublicKey(eventAddress);
-            const eventAccount = await program.account.event.fetch(eventPubkey);
-            
-            if (eventAccount.metadataUri) {
-                console.log(`🌐 Buscando metadados do IPFS: ${eventAccount.metadataUri}`);
-                
-                // Tentar múltiplos gateways IPFS
-                let metadataFetched = false;
-                for (const gateway of ipfsGateways) {
-                    try {
-                        const metadataUrl = eventAccount.metadataUri.replace('https://gateway.pinata.cloud/ipfs/', gateway);
-                        console.log(`   Tentando gateway: ${gateway}`);
-                        
-                        const metadataResponse = await fetch(metadataUrl);
-                        if (metadataResponse.ok) {
-                            eventMetadata = await metadataResponse.json();
-                            metadataFetched = true;
-                            
-                            // Processar URLs de imagem com gateways
-                            eventImage = await optimizeIpfsUrl(eventMetadata.image || '');
-                            eventName = eventMetadata.name || eventAccount.name || "Evento";
-                            
-                            // ✅ ACESSO SEGURO À DATA
-                            eventDate = eventMetadata.properties?.dateTime?.start || 
-                                       eventMetadata.dateTime?.start || 
-                                       eventMetadata.startDate || 
-                                       "Data a ser definida";
-                            
-                            // ✅ ACESSO SEGURO AO LOCAL
-                            eventLocation = eventMetadata.properties?.location?.venueName ||
-                                           eventMetadata.properties?.location?.address?.city ||
-                                           eventMetadata.location?.venueName ||
-                                           eventMetadata.location?.address?.city ||
-                                           eventMetadata.location ||
-                                           "Local a ser definido";
-                            
-                            organizerName = eventMetadata.organizer?.name || "Organizador";
-                            organizerLogo = await optimizeIpfsUrl(eventMetadata.organizer?.organizerLogo || '');
-                            
-                            console.log(`✅ Metadados carregados via gateway: ${gateway}`);
-                            break;
-                        }
-                    } catch (gatewayError) {
-                        console.warn(`   ❌ Gateway falhou: ${gateway}`, gatewayError.message);
-                    }
-                }
-                
-                if (!metadataFetched) {
-                    console.warn('❌ Todos os gateways IPFS falharam');
-                }
-            } else {
-                console.warn('⚠️ Evento não tem metadataUri na blockchain');
-            }
-        } catch (blockchainError) {
-            console.warn('❌ Erro ao buscar evento na blockchain:', blockchainError.message);
-        }
-    }
-
     console.log('📋 Metadados finais:', { 
         eventName, 
         eventDate, 
-        eventLocation, 
+        eventLocation: eventLocation.replace(/\n/g, ' | '), // Para log ficar legível
         hasImage: !!eventImage,
         hasOrganizerLogo: !!organizerLogo 
     });
@@ -498,7 +511,7 @@ async function getEventMetadataForEmail(eventAddress) {
     return { eventMetadata, eventImage, eventName, eventDate, eventLocation, organizerName, organizerLogo };
 }
 
-// Função para otimizar URLs IPFS com múltiplos gateways
+// Função para otimizar URLs IPFS (mantenha a que você já tem)
 async function optimizeIpfsUrl(ipfsUrl) {
     if (!ipfsUrl || !ipfsUrl.includes('ipfs')) return ipfsUrl;
     

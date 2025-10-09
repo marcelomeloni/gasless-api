@@ -84,30 +84,127 @@ export const processPaidTicketForNewUser = async ({
         });
 
         // 4. Envio de e-mail
-        if (email) {
-            try {
-                const metadataResponse = await fetch(eventAccount.metadataUri);
-                const metadata = await metadataResponse.json();
-                const ticketDataForEmail = {
-                    eventName: metadata.name, 
-                    eventDate: metadata.properties.dateTime.start,
-                    eventLocation: metadata.properties.location, 
-                    mintAddress: mintAddress,
-                    seedPhrase: mnemonic, 
-                    privateKey: privateKey, 
-                    eventImage: metadata.image,
-                    registrationId: registrationId,
-                    isPaid: true,
-                    paymentAmount: (priceBRLCents / 100).toFixed(2)
-                };
-                const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
-if (!emailResult.success) {
-    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
-}
-            } catch(e) {
-                console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+       if (email) {
+    try {
+        // ✅ BUSCA SEGURA DE METADADOS DO EVENTO
+        let eventMetadata = {};
+        let eventImage = '';
+        let eventName = "Evento";
+        let eventDate = "Data a ser definida";
+        let eventLocation = "Local a ser definido";
+        let organizerName = "Organizador";
+
+        try {
+            // 1. PRIMEIRO: Buscar do Supabase (mais rápido e confiável)
+            const { data: dbEvent, error: dbError } = await supabase
+                .from('events')
+                .select('metadata, image_url, event_name')
+                .eq('event_address', eventAddress)
+                .single();
+
+            if (!dbError && dbEvent && dbEvent.metadata) {
+                console.log('✅ Metadados carregados do Supabase');
+                eventMetadata = dbEvent.metadata;
+                eventImage = dbEvent.image_url || eventMetadata.image || '';
+                eventName = eventMetadata.name || dbEvent.event_name || "Evento";
+                
+                // ✅ ACESSO SEGURO À DATA
+                eventDate = eventMetadata.properties?.dateTime?.start || 
+                           eventMetadata.dateTime?.start || 
+                           eventMetadata.startDate || 
+                           "Data a ser definida";
+                
+                // ✅ ACESSO SEGURO AO LOCAL
+                eventLocation = eventMetadata.properties?.location?.venueName ||
+                               eventMetadata.properties?.location?.address?.city ||
+                               eventMetadata.location?.venueName ||
+                               eventMetadata.location?.address?.city ||
+                               eventMetadata.location ||
+                               "Local a ser definido";
+                
+                organizerName = eventMetadata.organizer?.name || "Organizador";
+                
+            } else {
+                // 2. FALLBACK: Buscar da blockchain + IPFS
+                console.log('🔄 Buscando metadados da blockchain...');
+                const eventPubkey = new PublicKey(eventAddress);
+                const eventAccount = await program.account.event.fetch(eventPubkey);
+                
+                if (eventAccount.metadataUri) {
+                    try {
+                        const metadataResponse = await fetch(eventAccount.metadataUri);
+                        if (metadataResponse.ok) {
+                            eventMetadata = await metadataResponse.json();
+                            eventImage = eventMetadata.image || '';
+                            eventName = eventMetadata.name || eventAccount.name || "Evento";
+                            
+                            // ✅ ACESSO SEGURO À DATA (fallback)
+                            eventDate = eventMetadata.properties?.dateTime?.start || 
+                                       eventMetadata.dateTime?.start || 
+                                       eventMetadata.startDate || 
+                                       "Data a ser definida";
+                            
+                            // ✅ ACESSO SEGURO AO LOCAL (fallback)
+                            eventLocation = eventMetadata.properties?.location?.venueName ||
+                                           eventMetadata.properties?.location?.address?.city ||
+                                           eventMetadata.location?.venueName ||
+                                           eventMetadata.location?.address?.city ||
+                                           eventMetadata.location ||
+                                           "Local a ser definido";
+                            
+                            organizerName = eventMetadata.organizer?.name || "Organizador";
+                        }
+                    } catch (ipfsError) {
+                        console.warn('❌ Erro ao buscar metadados do IPFS:', ipfsError);
+                    }
+                }
             }
+        } catch (metadataError) {
+            console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError);
+            // 3. FALLBACK FINAL: Valores padrão
+            eventName = "Evento Especial";
+            eventDate = "Data a ser definida";
+            eventLocation = "Local a ser definido";
+            organizerName = "Organizador";
         }
+
+        // ✅ DADOS SEGUROS PARA O EMAIL
+        const ticketDataForEmail = {
+            eventName: eventName,
+            eventDate: eventDate,
+            eventLocation: eventLocation,
+            mintAddress: mintAddress,
+            seedPhrase: mnemonic, 
+            privateKey: privateKey, 
+            eventImage: eventImage,
+            registrationId: registrationId,
+            organizerName: organizerName,
+            // ✅ Incluir campos adicionais para paid tickets
+            ...(isPaid && { 
+                isPaid: true,
+                paymentAmount: (priceBRLCents / 100).toFixed(2)
+            })
+        };
+
+        console.log('📧 Dados preparados para email:', {
+            eventName: ticketDataForEmail.eventName,
+            eventDate: ticketDataForEmail.eventDate,
+            eventLocation: ticketDataForEmail.eventLocation,
+            hasImage: !!ticketDataForEmail.eventImage
+        });
+
+        const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+        
+        if (!emailResult.success) {
+            console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+        } else {
+            console.log("✅ E-mail enviado com sucesso para:", email);
+        }
+        
+    } catch(e) {
+        console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+    }
+}
 
         return {
             success: true, 
@@ -187,28 +284,127 @@ export const generateWalletAndMint = async (req, res) => {
         });
 
         // 4. Envio de e-mail (lógica inalterada)
-        if (email) {
-            try {
-                const metadataResponse = await fetch(eventAccount.metadataUri);
-                const metadata = await metadataResponse.json();
-                const ticketDataForEmail = {
-                    eventName: metadata.name, 
-                    eventDate: metadata.properties.dateTime.start,
-                    eventLocation: metadata.properties.location, 
-                    mintAddress: mintAddress,
-                    seedPhrase: mnemonic, 
-                    privateKey: privateKey, 
-                    eventImage: metadata.image,
-                    registrationId: registrationId,
-                };
-                const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
-if (!emailResult.success) {
-    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
-}
-            } catch(e) {
-                console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+      if (email) {
+    try {
+        // ✅ BUSCA SEGURA DE METADADOS DO EVENTO
+        let eventMetadata = {};
+        let eventImage = '';
+        let eventName = "Evento";
+        let eventDate = "Data a ser definida";
+        let eventLocation = "Local a ser definido";
+        let organizerName = "Organizador";
+
+        try {
+            // 1. PRIMEIRO: Buscar do Supabase (mais rápido e confiável)
+            const { data: dbEvent, error: dbError } = await supabase
+                .from('events')
+                .select('metadata, image_url, event_name')
+                .eq('event_address', eventAddress)
+                .single();
+
+            if (!dbError && dbEvent && dbEvent.metadata) {
+                console.log('✅ Metadados carregados do Supabase');
+                eventMetadata = dbEvent.metadata;
+                eventImage = dbEvent.image_url || eventMetadata.image || '';
+                eventName = eventMetadata.name || dbEvent.event_name || "Evento";
+                
+                // ✅ ACESSO SEGURO À DATA
+                eventDate = eventMetadata.properties?.dateTime?.start || 
+                           eventMetadata.dateTime?.start || 
+                           eventMetadata.startDate || 
+                           "Data a ser definida";
+                
+                // ✅ ACESSO SEGURO AO LOCAL
+                eventLocation = eventMetadata.properties?.location?.venueName ||
+                               eventMetadata.properties?.location?.address?.city ||
+                               eventMetadata.location?.venueName ||
+                               eventMetadata.location?.address?.city ||
+                               eventMetadata.location ||
+                               "Local a ser definido";
+                
+                organizerName = eventMetadata.organizer?.name || "Organizador";
+                
+            } else {
+                // 2. FALLBACK: Buscar da blockchain + IPFS
+                console.log('🔄 Buscando metadados da blockchain...');
+                const eventPubkey = new PublicKey(eventAddress);
+                const eventAccount = await program.account.event.fetch(eventPubkey);
+                
+                if (eventAccount.metadataUri) {
+                    try {
+                        const metadataResponse = await fetch(eventAccount.metadataUri);
+                        if (metadataResponse.ok) {
+                            eventMetadata = await metadataResponse.json();
+                            eventImage = eventMetadata.image || '';
+                            eventName = eventMetadata.name || eventAccount.name || "Evento";
+                            
+                            // ✅ ACESSO SEGURO À DATA (fallback)
+                            eventDate = eventMetadata.properties?.dateTime?.start || 
+                                       eventMetadata.dateTime?.start || 
+                                       eventMetadata.startDate || 
+                                       "Data a ser definida";
+                            
+                            // ✅ ACESSO SEGURO AO LOCAL (fallback)
+                            eventLocation = eventMetadata.properties?.location?.venueName ||
+                                           eventMetadata.properties?.location?.address?.city ||
+                                           eventMetadata.location?.venueName ||
+                                           eventMetadata.location?.address?.city ||
+                                           eventMetadata.location ||
+                                           "Local a ser definido";
+                            
+                            organizerName = eventMetadata.organizer?.name || "Organizador";
+                        }
+                    } catch (ipfsError) {
+                        console.warn('❌ Erro ao buscar metadados do IPFS:', ipfsError);
+                    }
+                }
             }
+        } catch (metadataError) {
+            console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError);
+            // 3. FALLBACK FINAL: Valores padrão
+            eventName = "Evento Especial";
+            eventDate = "Data a ser definida";
+            eventLocation = "Local a ser definido";
+            organizerName = "Organizador";
         }
+
+        // ✅ DADOS SEGUROS PARA O EMAIL
+        const ticketDataForEmail = {
+            eventName: eventName,
+            eventDate: eventDate,
+            eventLocation: eventLocation,
+            mintAddress: mintAddress,
+            seedPhrase: mnemonic, 
+            privateKey: privateKey, 
+            eventImage: eventImage,
+            registrationId: registrationId,
+            organizerName: organizerName,
+            // ✅ Incluir campos adicionais para paid tickets
+            ...(isPaid && { 
+                isPaid: true,
+                paymentAmount: (priceBRLCents / 100).toFixed(2)
+            })
+        };
+
+        console.log('📧 Dados preparados para email:', {
+            eventName: ticketDataForEmail.eventName,
+            eventDate: ticketDataForEmail.eventDate,
+            eventLocation: ticketDataForEmail.eventLocation,
+            hasImage: !!ticketDataForEmail.eventImage
+        });
+
+        const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+        
+        if (!emailResult.success) {
+            console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+        } else {
+            console.log("✅ E-mail enviado com sucesso para:", email);
+        }
+        
+    } catch(e) {
+        console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+    }
+}
 
         // 5. Resposta final ao cliente, agora incluindo o registrationId
         res.status(200).json({ 
@@ -336,35 +532,127 @@ export const mintForExistingUser = async (req, res) => {
 
         // 3. Envio de e-mail (lógica inalterada)
         const triggerEmail = async () => {
-            if (email) {
-                try {
-                    const metadataResponse = await fetch(eventAccount.metadataUri);
-                    const metadata = await metadataResponse.json();
-                    
-                    const ticketDataForEmail = {
-                        eventName: metadata.name, 
-                        eventDate: metadata.properties.dateTime.start,
-                        eventLocation: metadata.properties.location, 
-                        mintAddress: mintAddress,
-                        eventImage: metadata.image, 
-                        eventDescription: metadata.description, 
-                        eventCategory: metadata.category, 
-                        eventTags: metadata.tags, 
-                        organizerName: metadata.organizer.name, 
-                        organizerLogo: metadata.organizer.organizerLogo, 
-                        organizerWebsite: metadata.organizer.website,
-                        registrationId: registrationId,
-                    };
-                    
-                    const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
-if (!emailResult.success) {
-    console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
-}
-                } catch (e) {
-                    console.error("Falha ao preparar/enviar e-mail:", e);
+          if (email) {
+    try {
+        // ✅ BUSCA SEGURA DE METADADOS DO EVENTO
+        let eventMetadata = {};
+        let eventImage = '';
+        let eventName = "Evento";
+        let eventDate = "Data a ser definida";
+        let eventLocation = "Local a ser definido";
+        let organizerName = "Organizador";
+
+        try {
+            // 1. PRIMEIRO: Buscar do Supabase (mais rápido e confiável)
+            const { data: dbEvent, error: dbError } = await supabase
+                .from('events')
+                .select('metadata, image_url, event_name')
+                .eq('event_address', eventAddress)
+                .single();
+
+            if (!dbError && dbEvent && dbEvent.metadata) {
+                console.log('✅ Metadados carregados do Supabase');
+                eventMetadata = dbEvent.metadata;
+                eventImage = dbEvent.image_url || eventMetadata.image || '';
+                eventName = eventMetadata.name || dbEvent.event_name || "Evento";
+                
+                // ✅ ACESSO SEGURO À DATA
+                eventDate = eventMetadata.properties?.dateTime?.start || 
+                           eventMetadata.dateTime?.start || 
+                           eventMetadata.startDate || 
+                           "Data a ser definida";
+                
+                // ✅ ACESSO SEGURO AO LOCAL
+                eventLocation = eventMetadata.properties?.location?.venueName ||
+                               eventMetadata.properties?.location?.address?.city ||
+                               eventMetadata.location?.venueName ||
+                               eventMetadata.location?.address?.city ||
+                               eventMetadata.location ||
+                               "Local a ser definido";
+                
+                organizerName = eventMetadata.organizer?.name || "Organizador";
+                
+            } else {
+                // 2. FALLBACK: Buscar da blockchain + IPFS
+                console.log('🔄 Buscando metadados da blockchain...');
+                const eventPubkey = new PublicKey(eventAddress);
+                const eventAccount = await program.account.event.fetch(eventPubkey);
+                
+                if (eventAccount.metadataUri) {
+                    try {
+                        const metadataResponse = await fetch(eventAccount.metadataUri);
+                        if (metadataResponse.ok) {
+                            eventMetadata = await metadataResponse.json();
+                            eventImage = eventMetadata.image || '';
+                            eventName = eventMetadata.name || eventAccount.name || "Evento";
+                            
+                            // ✅ ACESSO SEGURO À DATA (fallback)
+                            eventDate = eventMetadata.properties?.dateTime?.start || 
+                                       eventMetadata.dateTime?.start || 
+                                       eventMetadata.startDate || 
+                                       "Data a ser definida";
+                            
+                            // ✅ ACESSO SEGURO AO LOCAL (fallback)
+                            eventLocation = eventMetadata.properties?.location?.venueName ||
+                                           eventMetadata.properties?.location?.address?.city ||
+                                           eventMetadata.location?.venueName ||
+                                           eventMetadata.location?.address?.city ||
+                                           eventMetadata.location ||
+                                           "Local a ser definido";
+                            
+                            organizerName = eventMetadata.organizer?.name || "Organizador";
+                        }
+                    } catch (ipfsError) {
+                        console.warn('❌ Erro ao buscar metadados do IPFS:', ipfsError);
+                    }
                 }
             }
+        } catch (metadataError) {
+            console.warn('⚠️ Erro ao buscar metadados, usando valores padrão:', metadataError);
+            // 3. FALLBACK FINAL: Valores padrão
+            eventName = "Evento Especial";
+            eventDate = "Data a ser definida";
+            eventLocation = "Local a ser definido";
+            organizerName = "Organizador";
+        }
+
+        // ✅ DADOS SEGUROS PARA O EMAIL
+        const ticketDataForEmail = {
+            eventName: eventName,
+            eventDate: eventDate,
+            eventLocation: eventLocation,
+            mintAddress: mintAddress,
+            seedPhrase: mnemonic, 
+            privateKey: privateKey, 
+            eventImage: eventImage,
+            registrationId: registrationId,
+            organizerName: organizerName,
+            // ✅ Incluir campos adicionais para paid tickets
+            ...(isPaid && { 
+                isPaid: true,
+                paymentAmount: (priceBRLCents / 100).toFixed(2)
+            })
         };
+
+        console.log('📧 Dados preparados para email:', {
+            eventName: ticketDataForEmail.eventName,
+            eventDate: ticketDataForEmail.eventDate,
+            eventLocation: ticketDataForEmail.eventLocation,
+            hasImage: !!ticketDataForEmail.eventImage
+        });
+
+        const emailResult = await sendTicketEmail({ name, email }, ticketDataForEmail);
+        
+        if (!emailResult.success) {
+            console.error("Falha no envio de e-mail, mas o mint foi bem-sucedido:", emailResult.error);
+        } else {
+            console.log("✅ E-mail enviado com sucesso para:", email);
+        }
+        
+    } catch(e) {
+        console.error("Falha ao enviar e-mail (mas o mint funcionou):", e);
+    }
+}
 
         triggerEmail();
 

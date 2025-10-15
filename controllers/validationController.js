@@ -567,3 +567,127 @@ export const clearKeypairCache = async (req, res) => {
   console.log(`[CACHE] ✅ Cache limpo. ${count} keypairs removidos.`);
   res.status(200).json({ success: true, message: `Cache limpo. ${count} keypairs removidos.` });
 };
+
+/**
+ * Verificação rápida de permissão de validador para um evento específico
+ * Com cache para melhor performance
+ */
+export const checkEventValidatorStatus = async (req, res) => {
+  const { eventAddress, validatorAddress } = req.params;
+
+  console.log(`[EVENT-STATUS] Verificando permissões para evento: ${eventAddress}`);
+  console.log(`[EVENT-STATUS] Validador: ${validatorAddress}`);
+
+  // Cache simples em memória (pode ser substituído por Redis em produção)
+  const eventCache = new Map();
+  const CACHE_TTL = 30000; // 30 segundos
+
+  try {
+    // Validação básica dos parâmetros
+    if (!eventAddress || !validatorAddress) {
+      return res.status(400).json({
+        success: false,
+        error: "Endereço do evento e do validador são obrigatórios."
+      });
+    }
+
+    let eventAccount;
+    const cacheKey = `${eventAddress}`;
+    const cachedData = eventCache.get(cacheKey);
+
+    // ETAPA 1: Verificar cache
+    if (cachedData && (Date.now() - cachedData.timestamp) < CACHE_TTL) {
+      console.log(`[EVENT-STATUS] ✅ Usando dados em cache para evento: ${eventAddress}`);
+      eventAccount = cachedData.data;
+    } else {
+      // ETAPA 2: Buscar conta do evento on-chain
+      console.log(`[EVENT-STATUS] 🔍 Buscando dados on-chain para evento: ${eventAddress}`);
+      
+      try {
+        const eventPubkey = new anchor.web3.PublicKey(eventAddress);
+        eventAccount = await program.account.event.fetch(eventPubkey);
+        
+        // Armazenar no cache
+        eventCache.set(cacheKey, {
+          data: eventAccount,
+          timestamp: Date.now()
+        });
+        
+        console.log(`[EVENT-STATUS] ✅ Dados do evento carregados com sucesso`);
+      } catch (error) {
+        console.error(`[EVENT-STATUS] ❌ Erro ao buscar conta do evento:`, error.message);
+        
+        // Se não encontrar a conta do evento, retornar status apropriado
+        return res.status(200).json({
+          success: true,
+          isValidator: false,
+          eventName: `Evento ${eventAddress.slice(0, 8)}...`,
+          totalTicketsSold: "0",
+          details: "Conta do evento não encontrada na blockchain."
+        });
+      }
+    }
+
+    // ETAPA 3: Verificar se o validador está autorizado
+    console.log(`[EVENT-STATUS] 🔍 Verificando permissões do validador...`);
+    
+    // Converter todos os endereços para string para comparação consistente
+    const validatorPubkey = new anchor.web3.PublicKey(validatorAddress);
+    const isValidValidator = eventAccount.validators.some(
+      validator => validator.toString() === validatorPubkey.toString()
+    );
+
+    console.log(`[EVENT-STATUS] 📊 Status do validador: ${isValidValidator ? 'AUTORIZADO' : 'NÃO AUTORIZADO'}`);
+
+    // ETAPA 4: Buscar metadados do evento no Supabase
+    let eventName = `Evento ${eventAddress.slice(0, 8)}...`;
+    try {
+      console.log(`[EVENT-STATUS] 🔍 Buscando metadados do evento no Supabase...`);
+      const { data: eventData, error: eventError } = await supabase
+        .from('events')
+        .select('name, metadata')
+        .eq('address', eventAddress)
+        .single();
+
+      if (!eventError && eventData) {
+        eventName = eventData.name || eventData.metadata?.name || eventName;
+        console.log(`[EVENT-STATUS] ✅ Metadados encontrados: ${eventName}`);
+      } else {
+        console.log(`[EVENT-STATUS] ℹ️  Metadados não encontrados, usando nome padrão`);
+      }
+    } catch (error) {
+      console.log(`[EVENT-STATUS] ⚠️  Erro ao buscar metadados:`, error.message);
+      // Continuamos com o nome padrão em caso de erro
+    }
+
+    // ETAPA 5: Preparar resposta
+    const totalTicketsSold = eventAccount.ticketsSold?.toString() || "0";
+    
+    const response = {
+      success: true,
+      isValidator: isValidValidator,
+      eventName,
+      totalTicketsSold,
+      details: isValidValidator 
+        ? "Validador autorizado para este evento." 
+        : "A carteira conectada não é um validador autorizado para este evento."
+    };
+
+    console.log(`[EVENT-STATUS] ✅ Resposta preparada:`, {
+      isValidator: response.isValidator,
+      eventName: response.eventName,
+      ticketsSold: response.totalTicketsSold
+    });
+
+    return res.status(200).json(response);
+
+  } catch (error) {
+    console.error(`[EVENT-STATUS] ❌ Erro interno do servidor:`, error);
+    
+    return res.status(500).json({
+      success: false,
+      error: "Erro interno do servidor ao verificar permissões.",
+      details: error.message
+    });
+  }
+};
